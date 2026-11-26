@@ -40,12 +40,16 @@
     </div>
     <footer class="reader-footer">
       <button id="menuToggle" type="button" aria-label="阅读菜单" aria-expanded="false">☰</button>
-      <div class="reader-footer-end"><span id="readPercent">0%</span><button id="nextChapter" class="chapter-skip" type="button" hidden>下一章 <span aria-hidden="true">›</span></button></div>
+      <div class="reader-footer-end"><span id="readPercent">0%</span></div>
     </footer>
     <div id="readerMenus" hidden>
       <header class="reader-toolbar"><button id="backShelf" type="button">‹ 书架</button><span id="toolbarTitle"></span><button id="hideMenu" type="button" aria-label="关闭阅读菜单">×</button></header>
       <div class="reading-tools">
-        <div class="jump"><label for="progress">全书进度</label><input id="progress" type="range" min="0" max="1000" value="0"><span id="jumpValue">0%</span></div>
+        <div class="jump">
+          <button id="prevChapter" class="chapter-jump" type="button" aria-label="上一章"><span aria-hidden="true">‹</span><small>上一章</small></button>
+          <div class="jump-track"><div class="jump-caption"><span id="jumpChapterTitle"></span><span id="jumpValue">0%</span></div><input id="progress" type="range" min="0" max="1000" value="0" aria-label="全书进度"></div>
+          <button id="nextChapterMenu" class="chapter-jump" type="button" aria-label="下一章"><span aria-hidden="true">›</span><small>下一章</small></button>
+        </div>
         <nav aria-label="阅读工具"><button id="tocBtn" type="button">目录</button><button id="bookmarksBtn" type="button">书签</button><button id="markBtn" type="button">加书签</button><button id="settingsBtn" type="button">Aa 设置</button></nav>
       </div>
     </div>

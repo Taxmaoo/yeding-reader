@@ -237,8 +237,6 @@ function renderSection(index) {
   }
   if (!active.spans.length) append('p', '\u00a0', start);
   passage.replaceChildren(fragment);
-  $('chapterLabel').textContent = active.chapters[chapter].title;
-  $('nextChapter').hidden = !active.chapters[chapter + 1];
   const previous = active.sections[index - 1];
   const next = active.sections[index + 1];
   $('prevSection').disabled = !previous;
@@ -293,11 +291,65 @@ function firstVisibleOffset(test) {
   return Math.max(section.start, span.start + low);
 }
 
+function currentChapterIndex() {
+  return active.sections[active.sectionIndex].chapter;
+}
+
+function isChapterEndVisible() {
+  const next = active.sections[active.sectionIndex + 1];
+  if (next?.chapter === currentChapterIndex()) return false;
+  if (active.book.settings.mode === 'page') return active.page >= pageCount() - 1;
+  const lastParagraph = active.spans.at(-1).node.getBoundingClientRect();
+  const viewportBounds = viewport.getBoundingClientRect();
+  return lastParagraph.bottom <= viewportBounds.bottom + 2
+    && lastParagraph.right <= viewportBounds.right + 2;
+}
+
+function recordChapterProgress(complete = false) {
+  const { book, chapters, text } = active;
+  book.chapterProgress ??= [];
+  const index = currentChapterIndex();
+  const { start } = chapters[index];
+  const end = chapters[index + 1]?.start ?? text.length;
+  const progress = complete || (book.finished && index === chapters.length - 1)
+    ? 100
+    : progressAt(book.position - start, end - start);
+  book.chapterProgress[index] = Math.max(book.chapterProgress[index] || 0, progress);
+}
+
+function completeChapterIfSeenToEnd() {
+  if (active && isChapterEndVisible()) recordChapterProgress(true);
+}
+
+function updateChapterRow(row, index, currentIndex) {
+  const progress = active.book.chapterProgress?.[index] || 0;
+  const isCurrent = index === currentIndex;
+  row.dataset.state = progress === 100 ? 'read' : progress > 0 ? 'partial' : 'unread';
+  if (isCurrent) row.setAttribute('aria-current', 'location');
+  else row.removeAttribute('aria-current');
+  const label = progress === 100 ? '已读' : isCurrent ? '正在读' : progress > 0 ? '读到' : '未读';
+  row.querySelector('.chapter-progress').textContent = `${label} ${progress}%`;
+  row.querySelector('.chapter-progress-fill').style.width = `${progress}%`;
+}
+
+function syncChapterUI() {
+  const index = currentChapterIndex();
+  const { title } = active.chapters[index];
+  $('chapterLabel').textContent = $('jumpChapterTitle').textContent = title;
+  $('prevChapter').disabled = index === 0;
+  $('nextChapterMenu').disabled = index === active.chapters.length - 1;
+  if (!dialog.open) return;
+  const list = $('chapterList');
+  if (!list) return;
+  for (const row of list.children) updateChapterRow(row, Number(row.dataset.chapter), index);
+}
+
 function updateProgress() {
   const { position, length, finished } = active.book;
   const percent = progressAt(position, length, finished);
   $('readPercent').textContent = $('jumpValue').textContent = `${percent}%`;
   $('progress').value = finished ? 1000 : Math.min(999, Math.round(position / Math.max(1, length) * 1000));
+  syncChapterUI();
 }
 
 function jumpTo(offset, { keepFinished = false, endOfSection = false } = {}) {
@@ -324,6 +376,7 @@ function jumpTo(offset, { keepFinished = false, endOfSection = false } = {}) {
     ? firstVisibleOffset(rect => columnOf(rect) >= active.page)
     : position;
   book.finished = keepFinished;
+  recordChapterProgress();
   updateProgress();
   store(book);
 }
@@ -336,6 +389,7 @@ function updateScrollPosition() {
   const top = viewport.getBoundingClientRect().top;
   active.book.position = viewport.scrollTop < 2 ? section.start : firstVisibleOffset(rect => rect.bottom > top + 1);
   active.book.finished = false;
+  recordChapterProgress(isChapterEndVisible());
   updateProgress();
   store(active.book);
 }
@@ -349,8 +403,10 @@ function scrollHandler() {
 }
 
 function finishBook() {
+  if (scrollTimer) updateScrollPosition();
   if (active.book.finished) return toast('已经读到最后一页。');
   active.book.finished = true;
+  recordChapterProgress(true);
   updateProgress();
   store(active.book);
   toast('已读完全书。');
@@ -365,10 +421,13 @@ function turn(direction) {
     viewport.scrollLeft = page * (viewport.clientWidth + GAP);
     book.position = page === 0 ? sections[sectionIndex].start : firstVisibleOffset(rect => columnOf(rect) >= page);
     book.finished = false;
+    recordChapterProgress(isChapterEndVisible());
     updateProgress();
     store(book);
   } else if (direction > 0 && sectionIndex + 1 < sections.length) {
-    jumpTo(sections[sectionIndex + 1].start);
+    const next = sections[sectionIndex + 1];
+    if (next.chapter !== currentChapterIndex()) recordChapterProgress(true);
+    jumpTo(next.start);
   } else if (direction < 0 && sectionIndex > 0) {
     jumpTo(sections[sectionIndex - 1].end - 1, { endOfSection: true });
   } else if (direction > 0) {
@@ -382,28 +441,40 @@ function setMenu(open) {
 }
 
 function toc() {
+  if (scrollTimer) updateScrollPosition();
   const search = element('input', null, 'search-input');
   search.type = 'search';
   search.placeholder = '搜索正文';
   search.setAttribute('aria-label', '搜索正文');
   const results = element('div');
-  const list = element('div');
-  const currentChapter = active.sections[active.sectionIndex].chapter;
+  const chapterList = element('div');
+  chapterList.id = 'chapterList';
   const go = position => {
+    completeChapterIfSeenToEnd();
     dialog.close();
     setMenu(false);
     jumpTo(position);
     viewport.focus({ preventScroll: true });
   };
-  list.append(...active.chapters.map(({ title, start }, index) => {
-    const item = button(title, () => go(start), 'dialog-item');
-    if (index === currentChapter) item.setAttribute('aria-current', 'location');
-    return item;
+  const currentIndex = currentChapterIndex();
+  chapterList.append(...active.chapters.map(({ title, start }, index) => {
+    const row = element('button', null, 'chapter-row');
+    row.type = 'button';
+    row.dataset.chapter = index;
+    row.onclick = () => go(start);
+    const name = element('span', title, 'chapter-name');
+    const percent = element('span', null, 'chapter-progress');
+    const progress = element('span', null, 'chapter-progress-bar');
+    progress.setAttribute('aria-hidden', 'true');
+    progress.append(element('span', null, 'chapter-progress-fill'));
+    row.append(name, percent, progress);
+    updateChapterRow(row, index, currentIndex);
+    return row;
   }));
   search.oninput = () => {
     const query = search.value.trim();
     results.replaceChildren();
-    list.hidden = Boolean(query);
+    chapterList.hidden = Boolean(query);
     if (!query) return;
     const text = active.text;
     let pos = text.indexOf(query);
@@ -418,7 +489,8 @@ function toc() {
     if (!count) results.append(element('p', '未找到匹配的正文。'));
     if (pos !== -1) results.append(element('p', '显示前 40 条结果。'));
   };
-  openDialog('目录', ...(!active.hasHeadings ? [element('p', '未识别到常见章节标题，可搜索正文跳转。')] : []), search, results, list);
+  openDialog('目录', ...(!active.hasHeadings ? [element('p', '未识别到常见章节标题，可搜索正文跳转。')] : []), search, results, chapterList);
+  chapterList.querySelector('[aria-current="location"]')?.scrollIntoView({ block: 'nearest' });
 }
 
 function addMark() {
@@ -536,26 +608,38 @@ dialog.addEventListener('click', event => {
   const bounds = dialog.getBoundingClientRect();
   if (event.clientY < bounds.top || event.clientX < bounds.left || event.clientX > bounds.right) dialog.close();
 });
+let chapterNavAt = 0;
+function stepChapter(direction) {
+  const now = Date.now();
+  if (now - chapterNavAt < 350) return;
+  chapterNavAt = now;
+  const index = currentChapterIndex() + direction;
+  if (index < 0 || index >= active.chapters.length) return;
+  if (direction > 0) completeChapterIfSeenToEnd();
+  jumpTo(active.chapters[index].start);
+}
+
+$('prevChapter').onclick = () => {
+  if (active) stepChapter(-1);
+};
+$('nextChapterMenu').onclick = () => {
+  if (active) stepChapter(1);
+};
 $('progress').oninput = event => { $('jumpValue').textContent = `${Math.floor(event.target.value / 10)}%`; };
 $('progress').onchange = event => {
   const value = Number(event.target.value);
   const { text } = active;
   jumpTo(Math.floor(value / 1000 * (text.length - 1)), { endOfSection: value === 1000 });
 };
-$('nextChapter').onclick = event => {
-  if (!active) return;
-  const { chapter } = active.sections[active.sectionIndex];
-  const nextChapter = active.chapters[chapter + 1];
-  if (!nextChapter) return;
-  jumpTo(nextChapter.start);
-  if (event.currentTarget.hidden) viewport.focus({ preventScroll: true });
-};
 $('prevSection').onclick = () => {
   if (active.sectionIndex > 0) jumpTo(active.sections[active.sectionIndex - 1].start, { endOfSection: true });
 };
 $('nextSection').onclick = () => {
-  if (active.sectionIndex + 1 < active.sections.length) jumpTo(active.sections[active.sectionIndex + 1].start);
-  else finishBook();
+  if (active.sectionIndex + 1 < active.sections.length) {
+    const next = active.sections[active.sectionIndex + 1];
+    if (next.chapter !== currentChapterIndex()) recordChapterProgress(true);
+    jumpTo(next.start);
+  } else finishBook();
 };
 viewport.addEventListener('scroll', scrollHandler, { passive: true });
 viewport.addEventListener('click', event => {
