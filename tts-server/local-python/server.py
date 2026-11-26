@@ -115,17 +115,36 @@ async def handle_tts(request: web.Request) -> web.Response:
     except Exception:
         return web.json_response({"error": "请求体必须为 JSON"}, status=400, headers=cors_headers())
 
-    text = str(payload.get("input") or payload.get("text") or "").strip()
     voice = str(payload.get("voice") or DEFAULT_VOICE).strip()
-    speed = payload.get("speed", 1.0)
-
-    if not text:
-        return web.json_response({"error": "input 不能为空"}, status=400, headers=cors_headers())
-    if len(text) > 3000:
-        return web.json_response({"error": "单次文本过长（最多 3000 字）"}, status=400, headers=cors_headers())
+    speed = float(payload.get("speed", 1.0))
+    segments = payload.get("segments")
 
     try:
-        audio = await synthesize_mp3(text, voice, float(speed))
+        if isinstance(segments, list) and segments:
+            valid = [
+                (
+                    str(s.get("text") or "").strip(),
+                    str(s.get("voice") or voice).strip(),
+                    float(s.get("speed", speed)),
+                )
+                for s in segments
+                if isinstance(s, dict) and str(s.get("text") or "").strip()
+            ]
+            if not valid:
+                return web.json_response({"error": "segments 不能为空"}, status=400, headers=cors_headers())
+            if sum(len(t) for t, _, _ in valid) > 3500:
+                return web.json_response({"error": "单次文本过长（最多 3500 字）"}, status=400, headers=cors_headers())
+            parts = []
+            for seg_text, seg_voice, seg_speed in valid:
+                parts.append(await synthesize_mp3(seg_text, seg_voice, seg_speed))
+            audio = b"".join(parts)
+        else:
+            text = str(payload.get("input") or payload.get("text") or "").strip()
+            if not text:
+                return web.json_response({"error": "input 不能为空"}, status=400, headers=cors_headers())
+            if len(text) > 3500:
+                return web.json_response({"error": "单次文本过长（最多 3500 字）"}, status=400, headers=cors_headers())
+            audio = await synthesize_mp3(text, voice, speed)
     except Exception as exc:
         return web.json_response({"error": f"语音合成失败: {exc}"}, status=502, headers=cors_headers())
 
