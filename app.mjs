@@ -1,5 +1,6 @@
 import { DEFAULT_SETTINGS, SAMPLE, decodeTxt, indexText, sectionAt, progressAt, isLowSurrogate } from './reader-core.mjs';
 import { listBooks, readText, saveBook, addBook, deleteBook } from './storage.mjs';
+import { TtsController, EDGE_VOICES, SLEEP_OPTIONS, testTtsEndpoint, resolveApiEndpoint } from './tts.mjs';
 
 const $ = id => document.getElementById(id);
 const viewport = $('viewport');
@@ -178,6 +179,7 @@ async function openBook(book, supplied) {
 
 function closeReader() {
   if (!active) return;
+  tts.stop();
   if (active.book.settings.mode === 'scroll' && scrollTimer) updateScrollPosition();
   clearTimeout(scrollTimer);
   scrollTimer = null;
@@ -243,6 +245,7 @@ function renderSection(index) {
   $('prevSection').textContent = previous?.chapter === chapter ? '上一段' : '上一章';
   if (!next) $('nextSection').textContent = '读完本书';
   else $('nextSection').textContent = next.chapter === chapter ? '下一段' : '下一章';
+  syncTtsHighlight();
 }
 
 function spanAt(offset) {
@@ -352,7 +355,7 @@ function updateProgress() {
   syncChapterUI();
 }
 
-function jumpTo(offset, { keepFinished = false, endOfSection = false } = {}) {
+function jumpTo(offset, { keepFinished = false, endOfSection = false, fromTts = false } = {}) {
   if (!active) return;
   clearTimeout(scrollTimer);
   scrollTimer = null;
@@ -379,6 +382,7 @@ function jumpTo(offset, { keepFinished = false, endOfSection = false } = {}) {
   recordChapterProgress();
   updateProgress();
   store(book);
+  if (!fromTts && tts.active) tts.seekToOffset(book.position);
 }
 
 function updateScrollPosition() {
@@ -599,9 +603,265 @@ $('backShelf').onclick = closeReader;
 $('hideMenu').onclick = () => setMenu(false);
 $('menuToggle').onclick = () => setMenu($('readerMenus').hidden);
 $('tocBtn').onclick = toc;
+$('listenBtn').onclick = () => {
+  if (!active) return;
+  setMenu(false);
+  if (tts.active) tts.togglePlay();
+  else tts.start(active.book.title, active.text, active.chapters, active.book.position);
+};
 $('bookmarksBtn').onclick = bookmarks;
 $('markBtn').onclick = addMark;
 $('settingsBtn').onclick = settings;
+
+const RATE_STEPS = [1.0, 1.25, 1.5, 1.75, 2.0, 0.85];
+let highlightedChunk = null;
+
+function syncTtsHighlight(chunk = highlightedChunk) {
+  highlightedChunk = chunk;
+  if (!active) return;
+  for (const span of active.spans) {
+    const hit = Boolean(chunk && span.end > chunk.start && span.start < chunk.end);
+    span.node.classList.toggle('tts-reading', hit);
+  }
+}
+
+function renderTtsBar(state) {
+  const bar = $('ttsBar');
+  const wasHidden = bar.hidden;
+  bar.hidden = !state.active;
+  if (!state.active) return;
+
+  const engineLabel = state.engine === 'api' ? 'AI 语音' : '原生朗读';
+  const snippet = state.chunk?.text?.replace(/\s+/g, ' ').slice(0, 26) || '';
+  const chapter = state.chunk?.chapterTitle || '';
+  const prefix = state.loading ? '正在合成… ' : state.playing ? '正在听 · ' : '已暂停 · ';
+  $('ttsStatus').textContent = `${prefix}${chapter ? `${chapter} · ` : ''}${snippet || engineLabel}`;
+
+  $('ttsPlay').textContent = state.loading ? '缓冲…' : state.playing ? '暂停' : '播放';
+  $('ttsRate').textContent = `${Number(state.rate).toFixed(2).replace(/\.?0+$/, '')}x`;
+  $('ttsSleep').textContent = state.sleepLabel;
+  $('ttsSleep').dataset.active = String(state.sleepMode !== 'off');
+  $('ttsPrev').disabled = state.chunkIndex <= 0;
+  $('ttsNext').disabled = state.chunkIndex >= state.totalChunks - 1;
+
+  if (wasHidden && active) {
+    requestAnimationFrame(() => {
+      if (active) jumpTo(active.book.position, { keepFinished: active.book.finished, fromTts: true });
+    });
+  }
+}
+
+const tts = new TtsController({
+  onChunkChange(chunk) {
+    if (!active) return;
+    jumpTo(chunk.start, { fromTts: true });
+  },
+  onHighlight(chunk) {
+    syncTtsHighlight(chunk);
+  },
+  onStateChange(state) {
+    renderTtsBar(state);
+  },
+  onBookEnd() {
+    if (active) finishBook();
+  },
+  onToast(message) {
+    toast(message);
+  },
+  onNeedConfig() {
+    if (!dialog.open) openTtsSettings();
+  },
+});
+
+function openSleepDialog() {
+  const wrap = element('div', null, 'settings-row');
+  const items = element('div', null, 'choices');
+  items.style.flexWrap = 'wrap';
+  for (const opt of SLEEP_OPTIONS) {
+    const btn = button(opt.label, () => {
+      tts.setSleepMode(opt.value);
+      dialog.close();
+      toast(opt.value === 'off' ? '已关闭定时。' : `已设置定时：${opt.label}`);
+    });
+    btn.setAttribute('aria-pressed', String(tts.sleepMode === opt.value));
+    items.append(btn);
+  }
+  wrap.append(element('p', '定时暂停播放'), items);
+
+  const reread = button('从当前页重新开始朗读', () => {
+    dialog.close();
+    if (active) tts.start(active.book.title, active.text, active.chapters, active.book.position);
+  }, 'secondary');
+  reread.style.width = '100%';
+  reread.style.marginTop = '12px';
+
+  openDialog('听书定时', wrap, reread);
+}
+
+function openTtsSettings() {
+  const cfg = tts.settings;
+
+  const engineRow = element('div', null, 'settings-row');
+  const engineChoices = element('div', null, 'choices');
+  const apiFields = element('div');
+  const webFields = element('div');
+
+  const syncEngineVisibility = mode => {
+    apiFields.hidden = mode !== 'api';
+    webFields.hidden = mode !== 'web';
+  };
+
+  for (const [value, label] of [['api', '在线 AI 语音（锁屏连播）'], ['web', '浏览器原生（离线）']]) {
+    const item = button(label, () => {
+      tts.updateSettings({ engine: value });
+      for (const entry of engineChoices.children) entry.setAttribute('aria-pressed', String(entry === item));
+      syncEngineVisibility(value);
+    });
+    item.setAttribute('aria-pressed', String(cfg.engine === value));
+    engineChoices.append(item);
+  }
+  engineRow.append(
+    element('p', '语音引擎'),
+    engineChoices,
+    element('p', 'iPhone 锁屏连播需使用「在线 AI 语音」，可免费部署到自家电脑或 Cloudflare 自定义域名，国内直连无需代理。', 'tts-hint'),
+  );
+
+  // 语速调节
+  const rateRow = element('div', null, 'settings-row');
+  const rateLabel = element('label', null, 'setting-label');
+  const rateOutput = element('output', `${cfg.rate}x`);
+  const rateInput = element('input');
+  rateInput.id = 'tts-rate-range';
+  rateLabel.htmlFor = rateInput.id;
+  rateLabel.append(element('span', '朗读语速'), rateOutput);
+  Object.assign(rateInput, { type: 'range', min: 0.75, max: 2.0, step: 0.05, value: cfg.rate });
+  rateInput.oninput = () => {
+    const value = Number(rateInput.value);
+    rateOutput.value = `${value}x`;
+    tts.updateSettings({ rate: value });
+  };
+  rateRow.append(rateLabel, rateInput);
+
+  // 在线 AI 语音配置区
+  const voiceRow = element('div', null, 'settings-row');
+  const voiceSelect = element('select', null, 'encoding-select');
+  voiceSelect.setAttribute('aria-label', 'AI 主播音色');
+  for (const v of EDGE_VOICES) {
+    const opt = element('option', v.label);
+    opt.value = v.id;
+    if (v.id === cfg.voice) opt.selected = true;
+    voiceSelect.append(opt);
+  }
+  voiceSelect.onchange = () => tts.updateSettings({ voice: voiceSelect.value });
+
+  const customVoiceInput = element('input', null, 'tts-url-input');
+  customVoiceInput.type = 'text';
+  customVoiceInput.placeholder = '可选：自定义音色 ID（留空使用上方预设）';
+  customVoiceInput.value = cfg.customVoice || '';
+  customVoiceInput.onchange = () => tts.updateSettings({ customVoice: customVoiceInput.value.trim() });
+  voiceRow.append(element('p', '主播音色'), voiceSelect, customVoiceInput);
+
+  const apiRow = element('div', null, 'settings-row');
+  const urlInput = element('input', null, 'tts-url-input');
+  urlInput.type = 'url';
+  urlInput.placeholder = '留空默认使用同源 /api/tts，或填 https://tts.域名.com/v1/audio/speech';
+  urlInput.value = cfg.apiUrl || '';
+  urlInput.onchange = () => tts.updateSettings({ apiUrl: urlInput.value.trim() });
+
+  const keyInput = element('input', null, 'tts-url-input');
+  keyInput.type = 'password';
+  keyInput.placeholder = '可选：访问密钥 API Key（服务端未设则留空）';
+  keyInput.value = cfg.apiKey || '';
+  keyInput.onchange = () => tts.updateSettings({ apiKey: keyInput.value.trim() });
+
+  const testRow = element('div', null, 'tts-test-row');
+  const testBtn = button('测试连接并试听', async () => {
+    tts.updateSettings({
+      apiUrl: urlInput.value.trim(),
+      apiKey: keyInput.value.trim(),
+      voice: voiceSelect.value,
+      customVoice: customVoiceInput.value.trim(),
+    });
+    testBtn.disabled = true;
+    testBtn.textContent = '连接测试中…';
+    try {
+      const { blob } = await testTtsEndpoint(tts.settings);
+      const previewUrl = URL.createObjectURL(blob);
+      const preview = new Audio(previewUrl);
+      preview.onended = () => URL.revokeObjectURL(previewUrl);
+      await preview.play();
+      toast('连接成功，正在播放试听。');
+    } catch (err) {
+      toast(`连接失败：${err?.message || '请检查地址或跨域配置'}`);
+    } finally {
+      testBtn.disabled = false;
+      testBtn.textContent = '测试连接并试听';
+    }
+  }, 'primary');
+  const startNowBtn = button('保存并开始听书', () => {
+    tts.updateSettings({
+      apiUrl: urlInput.value.trim(),
+      apiKey: keyInput.value.trim(),
+      voice: voiceSelect.value,
+      customVoice: customVoiceInput.value.trim(),
+    });
+    dialog.close();
+    if (active) tts.start(active.book.title, active.text, active.chapters, active.book.position);
+  }, 'secondary');
+  testRow.append(testBtn, startNowBtn);
+
+  apiRow.append(
+    element('p', '免费 Edge-TTS / OpenAI 兼容接口'),
+    urlInput,
+    keyInput,
+    element('p', `当前请求地址：${resolveApiEndpoint(cfg.apiUrl)}`, 'tts-hint'),
+    testRow,
+  );
+  apiFields.append(voiceRow, apiRow);
+
+  // 浏览器原生朗读配置区
+  const webRow = element('div', null, 'settings-row');
+  const webVoiceSelect = element('select', null, 'encoding-select');
+  webVoiceSelect.setAttribute('aria-label', '系统朗读声音');
+  const fillWebVoices = () => {
+    webVoiceSelect.replaceChildren();
+    const autoOpt = element('option', '自动选择中文语音');
+    autoOpt.value = '';
+    webVoiceSelect.append(autoOpt);
+    const voices = (window.speechSynthesis?.getVoices?.() || []).filter(v => /^zh/i.test(v.lang));
+    for (const v of voices) {
+      const opt = element('option', `${v.name} (${v.lang})`);
+      opt.value = v.voiceURI;
+      if (v.voiceURI === tts.settings.webVoice) opt.selected = true;
+      webVoiceSelect.append(opt);
+    }
+  };
+  fillWebVoices();
+  if ('speechSynthesis' in window) window.speechSynthesis.onvoiceschanged = fillWebVoices;
+  webVoiceSelect.onchange = () => tts.updateSettings({ webVoice: webVoiceSelect.value });
+  webRow.append(
+    element('p', '系统语音（无需服务器、可离线）'),
+    webVoiceSelect,
+    element('p', '提示：浏览器原生朗读在 iPhone 锁屏后可能被系统暂停；锁屏连续听书建议切回「在线 AI 语音」。', 'tts-hint'),
+  );
+  webFields.append(webRow);
+
+  syncEngineVisibility(cfg.engine);
+  openDialog('听书设置', engineRow, rateRow, apiFields, webFields);
+}
+
+$('ttsPlay').onclick = () => tts.togglePlay();
+$('ttsPrev').onclick = () => tts.stepChunk(-1);
+$('ttsNext').onclick = () => tts.stepChunk(1);
+$('ttsClose').onclick = () => tts.stop();
+$('ttsRate').onclick = () => {
+  const idx = RATE_STEPS.indexOf(Number(tts.settings.rate));
+  const next = RATE_STEPS[(idx + 1) % RATE_STEPS.length];
+  tts.updateSettings({ rate: next });
+  toast(`语速已切至 ${next}x`);
+};
+$('ttsSleep').onclick = openSleepDialog;
+$('ttsConfig').onclick = openTtsSettings;
 $('closeDialog').onclick = () => dialog.close();
 dialog.addEventListener('click', event => {
   if (event.target !== dialog) return;

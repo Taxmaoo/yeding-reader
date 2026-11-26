@@ -42,6 +42,20 @@
       <button id="menuToggle" type="button" aria-label="阅读菜单" aria-expanded="false">☰</button>
       <div class="reader-footer-end"><span id="readPercent">0%</span></div>
     </footer>
+    <section id="ttsBar" class="tts-bar" aria-label="听书控制台" hidden>
+      <div class="tts-bar-top">
+        <span id="ttsStatus" class="tts-status">准备听书…</span>
+        <button id="ttsClose" class="tts-icon-btn" type="button" aria-label="退出听书">×</button>
+      </div>
+      <div class="tts-bar-controls">
+        <button id="ttsPrev" class="tts-btn" type="button" aria-label="上一段">‹ 上段</button>
+        <button id="ttsPlay" class="tts-play" type="button" aria-label="播放或暂停">播放</button>
+        <button id="ttsNext" class="tts-btn" type="button" aria-label="下一段">下段 ›</button>
+        <button id="ttsRate" class="tts-btn" type="button" aria-label="切换语速">1.0x</button>
+        <button id="ttsSleep" class="tts-btn" type="button" aria-label="定时关闭">定时</button>
+        <button id="ttsConfig" class="tts-btn" type="button" aria-label="听书设置">设置</button>
+      </div>
+    </section>
     <div id="readerMenus" hidden>
       <header class="reader-toolbar"><button id="backShelf" type="button">‹ 书架</button><span id="toolbarTitle"></span><button id="hideMenu" type="button" aria-label="关闭阅读菜单">×</button></header>
       <div class="reading-tools">
@@ -50,7 +64,7 @@
           <div class="jump-track"><div class="jump-caption"><span id="jumpChapterTitle"></span><span id="jumpValue">0%</span></div><input id="progress" type="range" min="0" max="1000" value="0" aria-label="全书进度"></div>
           <button id="nextChapterMenu" class="chapter-jump" type="button" aria-label="下一章"><span aria-hidden="true">›</span><small>下一章</small></button>
         </div>
-        <nav aria-label="阅读工具"><button id="tocBtn" type="button">目录</button><button id="bookmarksBtn" type="button">书签</button><button id="markBtn" type="button">加书签</button><button id="settingsBtn" type="button">Aa 设置</button></nav>
+        <nav aria-label="阅读工具"><button id="tocBtn" type="button">目录</button><button id="listenBtn" type="button">听书</button><button id="bookmarksBtn" type="button">书签</button><button id="markBtn" type="button">加书签</button><button id="settingsBtn" type="button">Aa 设置</button></nav>
       </div>
     </div>
   </section>

@@ -449,3 +449,99 @@ dialog::backdrop { background: rgb(30 22 16 / .42); }
   .book-open:hover strong, .dialog-item:hover, .reading-tools nav button:hover { color: var(--accent); }
   .icon-button:hover, .reader-footer button:hover, .dialog-header button:hover { background: var(--soft); }
 }
+
+/* 听书高亮与底部控制栏 */
+.passage .tts-reading {
+  background: var(--soft);
+  border-radius: 6px;
+  box-shadow: -5px 0 0 var(--soft), 5px 0 0 var(--soft);
+  transition: background-color .18s ease;
+}
+.tts-bar {
+  flex: 0 0 auto;
+  padding: 8px var(--right) 8px var(--left);
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+  box-shadow: 0 -4px 16px #24150b10;
+}
+.tts-bar-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 30px;
+}
+.tts-status {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 12px;
+}
+.tts-icon-btn {
+  min-width: 34px;
+  min-height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 20px;
+  line-height: 1;
+}
+.tts-bar-controls {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 4px;
+}
+.tts-btn, .tts-play {
+  min-height: 38px;
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tts-play {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+.tts-btn[data-active="true"] {
+  border-color: var(--accent);
+  background: var(--soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+.tts-hint {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.tts-test-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.tts-test-row button { flex: 1; }
+.tts-url-input {
+  width: 100%;
+  min-height: 42px;
+  margin: 4px 0 6px;
+  padding: 0 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 14px;
+}
+
