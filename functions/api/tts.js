@@ -198,8 +198,22 @@ function randomHex(byteLength) {
   return toHex(bytes);
 }
 
+function normalizeVoiceName(voice) {
+  const trimmed = String(voice || 'zh-CN-XiaoxiaoNeural').trim();
+  const shortMatch = /^([a-z]{2,})-([A-Z]{2,})-(.+Neural)$/.exec(trimmed);
+  if (!shortMatch) return trimmed;
+  let [, lang, region, name] = shortMatch;
+  if (name.includes('-')) {
+    const [regionSuffix, ...rest] = name.split('-');
+    region += `-${regionSuffix}`;
+    name = rest.join('-');
+  }
+  return `Microsoft Server Speech Text to Speech Voice (${lang}-${region}, ${name})`;
+}
+
 function escapeXml(text) {
   return text
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, ' ')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -233,7 +247,9 @@ async function synthesizeEdgeTts(text, voice, speed) {
       Upgrade: 'websocket',
       Pragma: 'no-cache',
       'Cache-Control': 'no-cache',
-      Origin: 'chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold',
+      'Sec-WebSocket-Version': '13',
+      'Accept-Encoding': 'gzip, deflate, br, zstd',
+      'Accept-Language': 'en-US,en;q=0.9',
       Cookie: `muid=${randomHex(16)};`,
       'User-Agent':
         `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ` +
@@ -243,13 +259,13 @@ async function synthesizeEdgeTts(text, voice, speed) {
 
   const ws = upstream.webSocket;
   if (!ws) throw new Error(`Edge TTS 握手失败（HTTP ${upstream.status}）`);
-  ws.accept();
 
   const requestId = randomHex(16).toLowerCase();
   const rate = speedToRate(speed);
+  const fullVoice = normalizeVoiceName(voice);
   const ssml =
-    `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='zh-CN'>` +
-    `<voice name='${escapeXml(voice)}'>` +
+    `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='en-US'>` +
+    `<voice name='${escapeXml(fullVoice)}'>` +
     `<prosody pitch='+0Hz' rate='${rate}' volume='+0%'>${escapeXml(text)}</prosody>` +
     `</voice></speak>`;
 
@@ -271,7 +287,7 @@ async function synthesizeEdgeTts(text, voice, speed) {
         const view = new DataView(event.data);
         const headerLen = view.getUint16(0);
         if (event.data.byteLength > headerLen + 2) {
-          audioChunks.push(new Uint8Array(event.data, 2 + headerLen));
+          audioChunks.push(new Uint8Array(event.data.slice(2 + headerLen)));
         }
       }
     });
@@ -284,12 +300,13 @@ async function synthesizeEdgeTts(text, voice, speed) {
       resolve();
     });
 
-    const timestamp = new Date().toUTCString();
+    ws.accept();
+    const timestamp = new Date().toISOString().replace(/[-:.]/g, '').slice(0, 15);
     ws.send(
       `X-Timestamp:${timestamp}\r\n` +
       `Content-Type:application/json; charset=utf-8\r\n` +
       `Path:speech.config\r\n\r\n` +
-      `{"context":{"synthesis":{"audio":{"metadataoptions":{"sentenceBoundaryEnabled":"false","wordBoundaryEnabled":"false"},"outputFormat":"audio-24khz-48kbitrate-mono-mp3"}}}}\r\n`,
+      `{"context":{"synthesis":{"audio":{"metadataoptions":{"sentenceBoundaryEnabled":"false","wordBoundaryEnabled":"true"},"outputFormat":"audio-24khz-48kbitrate-mono-mp3"}}}}\r\n`,
     );
     ws.send(
       `X-RequestId:${requestId}\r\n` +
@@ -311,13 +328,47 @@ async function synthesizeEdgeTts(text, voice, speed) {
   return merged;
 }
 
+async function synthesizeSegments(segments, defaultVoice, defaultSpeed) {
+  const valid = segments
+    .map(s => ({
+      text: String(s?.text || '').trim(),
+      voice: String(s?.voice || defaultVoice || 'zh-CN-YunjianNeural').trim(),
+      speed: s?.speed ?? defaultSpeed ?? 1.0,
+    }))
+    .filter(s => s.text.length > 0);
+  if (!valid.length) throw new Error('segments 不能为空');
+  if (valid.reduce((sum, s) => sum + s.text.length, 0) > 3500) throw new Error('单次文本最多 3500 字');
+
+  const results = new Array(valid.length);
+  let cursor = 0;
+  const workerCount = Math.min(3, valid.length);
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (cursor < valid.length) {
+        const idx = cursor++;
+        const seg = valid[idx];
+        results[idx] = await synthesizeEdgeTts(seg.text, seg.voice, seg.speed);
+      }
+    }),
+  );
+
+  const totalBytes = results.reduce((sum, arr) => sum + arr.byteLength, 0);
+  const merged = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const part of results) {
+    merged.set(part, offset);
+    offset += part.byteLength;
+  }
+  return merged;
+}
+
 export async function onRequest(context) {
   const { request, env } = context;
   if (request.method === 'OPTIONS') {
     return new Response(null, { status: 204, headers: corsHeaders() });
   }
   if (request.method === 'GET') {
-    return Response.json({ ok: true, engine: 'cloudflare-pages-edge-tts' }, { headers: corsHeaders() });
+    return Response.json({ ok: true, engine: 'cloudflare-pages-edge-tts', version: 'v3', multiRole: true }, { headers: corsHeaders() });
   }
   if (request.method !== 'POST') {
     return Response.json({ error: 'Method Not Allowed' }, { status: 405, headers: corsHeaders() });
@@ -332,14 +383,19 @@ export async function onRequest(context) {
 
   try {
     const body = await request.json();
-    const text = String(body.input || body.text || '').trim();
     const voice = String(body.voice || 'zh-CN-XiaoxiaoNeural').trim();
     const speed = body.speed ?? 1.0;
 
-    if (!text) return Response.json({ error: 'input 不能为空' }, { status: 400, headers: corsHeaders() });
-    if (text.length > 3000) return Response.json({ error: '单次文本最多 3000 字' }, { status: 400, headers: corsHeaders() });
+    let audio;
+    if (Array.isArray(body.segments) && body.segments.length > 0) {
+      audio = await synthesizeSegments(body.segments, voice, speed);
+    } else {
+      const text = String(body.input || body.text || '').trim();
+      if (!text) return Response.json({ error: 'input 不能为空' }, { status: 400, headers: corsHeaders() });
+      if (text.length > 3500) return Response.json({ error: '单次文本最多 3500 字' }, { status: 400, headers: corsHeaders() });
+      audio = await synthesizeEdgeTts(text, voice, speed);
+    }
 
-    const audio = await synthesizeEdgeTts(text, voice, speed);
     return new Response(audio, {
       headers: {
         ...corsHeaders(),
