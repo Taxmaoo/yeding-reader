@@ -38,7 +38,10 @@
       <article id="passage" class="passage"></article>
       <div id="sectionNav" class="section-nav"><button id="prevSection" type="button">上一段</button><button id="nextSection" type="button">下一段</button></div>
     </div>
-    <footer class="reader-footer"><button id="menuToggle" type="button" aria-label="阅读菜单" aria-expanded="false">☰</button><span id="readPercent">0%</span></footer>
+    <footer class="reader-footer">
+      <button id="menuToggle" type="button" aria-label="阅读菜单" aria-expanded="false">☰</button>
+      <div class="reader-footer-end"><span id="readPercent">0%</span><button id="nextChapter" class="chapter-skip" type="button" hidden>下一章 <span aria-hidden="true">›</span></button></div>
+    </footer>
     <div id="readerMenus" hidden>
       <header class="reader-toolbar"><button id="backShelf" type="button">‹ 书架</button><span id="toolbarTitle"></span><button id="hideMenu" type="button" aria-label="关闭阅读菜单">×</button></header>
       <div class="reading-tools">

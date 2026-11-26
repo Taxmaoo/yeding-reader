@@ -238,6 +238,7 @@ function renderSection(index) {
   if (!active.spans.length) append('p', '\u00a0', start);
   passage.replaceChildren(fragment);
   $('chapterLabel').textContent = active.chapters[chapter].title;
+  $('nextChapter').hidden = !active.chapters[chapter + 1];
   const previous = active.sections[index - 1];
   const next = active.sections[index + 1];
   $('prevSection').disabled = !previous;
@@ -540,6 +541,14 @@ $('progress').onchange = event => {
   const value = Number(event.target.value);
   const { text } = active;
   jumpTo(Math.floor(value / 1000 * (text.length - 1)), { endOfSection: value === 1000 });
+};
+$('nextChapter').onclick = event => {
+  if (!active) return;
+  const { chapter } = active.sections[active.sectionIndex];
+  const nextChapter = active.chapters[chapter + 1];
+  if (!nextChapter) return;
+  jumpTo(nextChapter.start);
+  if (event.currentTarget.hidden) viewport.focus({ preventScroll: true });
 };
 $('prevSection').onclick = () => {
   if (active.sectionIndex > 0) jumpTo(active.sections[active.sectionIndex - 1].start, { endOfSection: true });
