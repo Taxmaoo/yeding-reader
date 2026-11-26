@@ -15,20 +15,40 @@
 </head>
 <body>
   <div id="library" class="library">
-    <header class="brand"><img src="./icon-192.png" alt="" width="38" height="38"><span>页灯</span></header>
-    <main class="shelf">
-      <div class="shelf-heading">
-        <div><h1>我的书架</h1><p>导入手机里的 TXT，小说保存在这台设备上。</p></div>
-        <button id="importBtn" class="primary" type="button">＋ 导入 TXT</button>
+    <header class="brand">
+      <div class="brand-left">
+        <img src="./icon-192.png" alt="" width="34" height="34">
+        <div class="brand-title">
+          <strong>页灯书架</strong>
+          <span id="shelfCount" class="shelf-count">本地私密书库</span>
+        </div>
+      </div>
+      <div class="brand-actions">
+        <button id="viewToggle" class="pill-btn" type="button" aria-label="切换书架视图">列表</button>
+        <button id="importBtn" class="primary pill-primary" type="button">＋ 导入 TXT</button>
         <input id="fileInput" type="file" accept=".txt,text/plain" hidden>
       </div>
-      <div id="bookList" class="book-list"></div>
+    </header>
+    <main class="shelf">
+      <section id="resumeListenCard" class="resume-card" aria-label="上次听书记录" hidden></section>
+
+      <div id="shelfTools" class="shelf-tools" hidden>
+        <input id="shelfSearch" class="shelf-search" type="search" placeholder="搜索书架里的书…" aria-label="搜索书架">
+        <div id="shelfFilter" class="shelf-filter" role="tablist" aria-label="书架筛选">
+          <button type="button" data-filter="all" aria-selected="true">全部</button>
+          <button type="button" data-filter="listened" aria-selected="false">听过</button>
+          <button type="button" data-filter="finished" aria-selected="false">已读完</button>
+        </div>
+      </div>
+
+      <div id="bookList" class="book-list" data-view="grid"></div>
+
       <section id="empty" class="empty">
         <div class="sample-cover" aria-hidden="true"><span>山里的<br>邮局</span><span class="cover-mark">页灯</span></div>
-        <div><h2>先读一篇样章</h2><p>试试翻页、目录和夜间模式。</p><button id="sampleBtn" type="button">阅读《山里的邮局》 →</button></div>
+        <div><h2>先听一篇样章</h2><p>试试多角色听书、翻页和夜间模式。</p><button id="sampleBtn" type="button">阅读《山里的邮局》 →</button></div>
       </section>
       <p id="offlineStatus" class="storage-note" role="status" hidden></p>
-      <p class="storage-note">清除网站数据会移除书架。可从书架导出 TXT 备份。</p>
+      <p class="storage-note">书架与听书进度仅保存在本机浏览器中。可点书封右上角 ⋯ 导出 TXT 备份。</p>
     </main>
   </div>
 
@@ -40,12 +60,18 @@
     </div>
     <footer class="reader-footer">
       <button id="menuToggle" type="button" aria-label="阅读菜单" aria-expanded="false">☰</button>
-      <div class="reader-footer-end"><span id="readPercent">0%</span></div>
+      <div class="reader-footer-end">
+        <button id="quickListenBtn" class="quick-listen" type="button" aria-label="听书">🎧 听书</button>
+        <span id="readPercent">0%</span>
+      </div>
     </footer>
     <section id="ttsBar" class="tts-bar" aria-label="听书控制台" hidden>
       <div class="tts-bar-top">
         <span id="ttsStatus" class="tts-status">准备听书…</span>
-        <button id="ttsClose" class="tts-icon-btn" type="button" aria-label="退出听书">×</button>
+        <div class="tts-top-actions">
+          <button id="ttsCollapse" class="tts-icon-btn" type="button" aria-label="收起听书栏" title="收起听书栏">⌄</button>
+          <button id="ttsClose" class="tts-icon-btn" type="button" aria-label="退出听书" title="退出听书">×</button>
+        </div>
       </div>
       <div class="tts-bar-controls">
         <button id="ttsPrev" class="tts-btn" type="button" aria-label="上一段">‹ 上段</button>
@@ -53,7 +79,7 @@
         <button id="ttsNext" class="tts-btn" type="button" aria-label="下一段">下段 ›</button>
         <button id="ttsRate" class="tts-btn" type="button" aria-label="切换语速">1.0x</button>
         <button id="ttsSleep" class="tts-btn" type="button" aria-label="定时关闭">定时</button>
-        <button id="ttsConfig" class="tts-btn" type="button" aria-label="听书设置">设置</button>
+        <button id="ttsConfig" class="tts-btn" type="button" aria-label="音色与设置">音色</button>
       </div>
     </section>
     <div id="readerMenus" hidden>

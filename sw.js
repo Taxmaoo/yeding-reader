@@ -2,7 +2,7 @@
 
 const SCOPE = new URL(self.registration.scope);
 // 发布静态资源的任何变更时递增版本号；不同部署目录互不清理缓存。
-const VERSION = 'v6';
+const VERSION = 'v8';
 const CACHE_PREFIX = `yeding-reader:${encodeURIComponent(SCOPE.href)}:`;
 const CACHE_NAME = `${CACHE_PREFIX}${VERSION}`;
 const STATIC_URLS = new Set([
@@ -20,7 +20,6 @@ const STATIC_URLS = new Set([
 const ENTRY_URL = new URL('index.html', SCOPE);
 
 self.addEventListener('install', (event) => {
-  // 全部下载成功才安装；不复用浏览器 HTTP 缓存，也不接受重定向。
   event.waitUntil((async () => {
     const cache = await caches.open(CACHE_NAME);
     await cache.addAll([...STATIC_URLS].map((href) => new Request(href, {
@@ -28,8 +27,8 @@ self.addEventListener('install', (event) => {
       mode: 'same-origin',
       redirect: 'error',
     })));
+    await self.skipWaiting();
   })());
-  // 不调用 skipWaiting：等旧版页面关闭，避免旧页面混用新版脚本。
 });
 
 self.addEventListener('activate', (event) => {
@@ -38,6 +37,7 @@ self.addEventListener('activate', (event) => {
     await Promise.all(names.filter((name) => (
       name.startsWith(CACHE_PREFIX) && name !== CACHE_NAME
     )).map((name) => caches.delete(name)));
+    await self.clients.claim();
   })());
 });
 
@@ -50,7 +50,6 @@ self.addEventListener('fetch', (event) => {
   let cacheKey;
   if (request.mode === 'navigate') {
     if (url.pathname !== SCOPE.pathname && url.pathname !== ENTRY_URL.pathname) return;
-    // 目录首页和显式的 index.html 共用同一份预缓存。
     cacheKey = ENTRY_URL.href;
   } else if (STATIC_URLS.has(url.href)) {
     cacheKey = url.href;
@@ -58,9 +57,19 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // 只读预缓存；不将其他请求或用户正文写入 Cache Storage。
+  // 在线优先获取最新版，离线时自动回退本地缓存
   event.respondWith((async () => {
-    const response = await caches.match(cacheKey, { cacheName: CACHE_NAME });
-    return response || fetch(request);
+    try {
+      const fresh = await fetch(request);
+      if (fresh && fresh.ok) {
+        const cache = await caches.open(CACHE_NAME);
+        cache.put(cacheKey, fresh.clone()).catch(() => {});
+      }
+      return fresh;
+    } catch {
+      const cached = await caches.match(cacheKey, { cacheName: CACHE_NAME });
+      if (cached) return cached;
+      throw new Error('offline-and-uncached');
+    }
   })());
 });

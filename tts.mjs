@@ -1,16 +1,59 @@
-// 页灯听书引擎：支持在线 AI 语音（Edge-TTS / OpenAI 兼容接口，针对 iPhone Edge/Safari 锁屏连播优化）与浏览器原生朗读兜底。
+// 页灯听书引擎：支持免费多角色智能分声（旁白+男女对话自动切换）、iPhone 锁屏防断流连播、听书断点记录与浏览器原生离线兜底。
 
 const SETTINGS_KEY = 'yeding-tts-settings-v1';
+const LAST_LISTENED_KEY = 'yeding-tts-last-listened-v1';
+
+export const MULTI_ROLE_ID = 'multi-role';
 
 export const EDGE_VOICES = Object.freeze([
-  { id: 'zh-CN-XiaoxiaoNeural', label: '晓晓 · 温柔女声（推荐听书）' },
-  { id: 'zh-CN-YunxiNeural', label: '云希 · 阳光男声（推荐都市/玄幻）' },
-  { id: 'zh-CN-YunjianNeural', label: '云健 · 沉稳播讲（推荐历史/评书）' },
-  { id: 'zh-CN-XiaoyiNeural', label: '晓伊 · 灵动女声（推荐言情/轻小说）' },
-  { id: 'zh-CN-YunxiaNeural', label: '云夏 · 少年男声' },
-  { id: 'zh-CN-YunyangNeural', label: '云扬 · 专业播音' },
-  { id: 'zh-CN-liaoning-XiaobeiNeural', label: '晓北 · 东北女声' },
-  { id: 'zh-CN-shaanxi-XiaoniNeural', label: '晓妮 · 陕西女声' },
+  {
+    id: MULTI_ROLE_ID,
+    name: '升级版 · 多角色',
+    desc: '旁白大叔 + 男女对话分声',
+    badge: '多角色',
+  },
+  {
+    id: 'zh-CN-YunjianNeural',
+    name: '成熟大叔音',
+    desc: '沉稳有磁性 · 官场/历史',
+    badge: '超推荐',
+  },
+  {
+    id: 'zh-CN-XiaoxiaoNeural',
+    name: '温柔淑女音',
+    desc: '温暖自然 · 全题材百搭',
+    badge: '经典',
+  },
+  {
+    id: 'zh-CN-XiaoyiNeural',
+    name: '甜美少女音',
+    desc: '灵动有感染力 · 言情/轻小说',
+    badge: '',
+  },
+  {
+    id: 'zh-CN-YunxiNeural',
+    name: '开朗青年音',
+    desc: '轻快阳光 · 都市/玄幻',
+    badge: '',
+  },
+  {
+    id: 'zh-CN-YunyangNeural',
+    name: '清亮青叔音',
+    desc: '清晰专业 · 播音质感',
+    badge: '',
+  },
+  {
+    id: 'zh-CN-YunxiaNeural',
+    name: '活力少年音',
+    desc: '清澈少年感',
+    badge: '',
+  },
+  {
+    id: 'zh-CN-liaoning-XiaobeiNeural',
+    name: '东北爽朗女声',
+    desc: '风趣接地气 · 喜剧/日常',
+    badge: '方言',
+  },
 ]);
 
 export const SLEEP_OPTIONS = Object.freeze([
@@ -23,9 +66,9 @@ export const SLEEP_OPTIONS = Object.freeze([
 
 export const DEFAULT_TTS_SETTINGS = Object.freeze({
   engine: 'api', // 'api' | 'web'
-  apiUrl: '', // 留空时默认尝试同源 ./api/tts；可填自定义 Cloudflare Worker / 自建服务地址
+  apiUrl: '', // 留空时默认使用同源 ./api/tts
   apiKey: '',
-  voice: 'zh-CN-XiaoxiaoNeural',
+  voice: MULTI_ROLE_ID,
   customVoice: '',
   webVoice: '',
   rate: 1.0,
@@ -49,6 +92,99 @@ export function saveTtsSettings(settings) {
   }
 }
 
+export function loadLastListened() {
+  try {
+    const raw = localStorage.getItem(LAST_LISTENED_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveLastListened(record) {
+  try {
+    if (!record) localStorage.removeItem(LAST_LISTENED_KEY);
+    else localStorage.setItem(LAST_LISTENED_KEY, JSON.stringify(record));
+  } catch {
+    // 忽略存储异常
+  }
+}
+
+// 多角色自动分声：识别旁白与引号内对话，结合前后文称呼/人称智能分配男女声。
+const FEMALE_CUE = /她|姑娘|少女|女孩|女士|小姐|夫人|太太|妻子|老婆|妈妈|母亲|母后|姐姐|妹妹|师姐|师妹|学姐|学妹|阿姨|大嫂|嫂子|大娘|婆婆|公主|皇后|妃|仙子|丫鬟|女秘书|女助理|娇声|娇笑|柔声|轻笑|抿嘴|眨眨眼/;
+const MALE_CUE = /他|男子|男人|少年|男孩|先生|书记|县长|市长|局长|主任|老板|总管|老头|大叔|大哥|兄弟|小弟|爷爷|父亲|爸爸|师兄|师弟|少爷|公子|王爷|皇帝|将军|队长|老大|大喝|冷哼|沉声|皱眉|朗声/;
+
+const ROLE_VOICES = Object.freeze({
+  narrator: 'zh-CN-YunjianNeural', // 沉稳大叔旁白
+  maleA: 'zh-CN-YunxiNeural',      // 青年男声 A
+  maleB: 'zh-CN-YunyangNeural',    // 青叔男声 B（双男对话交替）
+  femaleA: 'zh-CN-XiaoxiaoNeural', // 温柔女声 A
+  femaleB: 'zh-CN-XiaoyiNeural',   // 甜美少女 B
+});
+
+export function segmentMultiRole(text) {
+  const quoteRe = /([“「『"][^”」』"\n]{2,260}[”」』"])/g;
+  const rawParts = [];
+  let lastIndex = 0;
+  let match;
+  let maleToggle = 0;
+  let femaleToggle = 0;
+
+  while ((match = quoteRe.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      const narr = text.slice(lastIndex, match.index).trim();
+      if (narr) rawParts.push({ text: narr, voice: ROLE_VOICES.narrator });
+    }
+    const quote = match[0].trim();
+    // 仅截取紧邻本句对话的归属上下文（不跨越前一个引号或句号/换行，避免串角色）
+    const rawBefore = text.slice(Math.max(0, match.index - 28), match.index);
+    const before = rawBefore.split(/[”」』"\n]/).pop() || '';
+    const rawAfter = text.slice(match.index + match[0].length, match.index + match[0].length + 24);
+    const after = rawAfter.split(/[“「『"\n]/)[0] || '';
+
+    // 紧接引号前的引导语（如“她轻轻一笑，”或“老周说：”）优先级最高
+    const leadIsCue = /[，,：:]$/.test(before.trim());
+    const afterIsOwnTag = after.trim().length > 0 && !/[，,：:]$/.test(after.trim());
+    const primary = leadIsCue ? before : afterIsOwnTag ? after : `${before} ${after}`;
+
+    let voice;
+    const primaryFemale = FEMALE_CUE.test(primary);
+    const primaryMale = MALE_CUE.test(primary);
+    if (primaryFemale && !primaryMale) {
+      voice = femaleToggle++ % 2 === 0 ? ROLE_VOICES.femaleA : ROLE_VOICES.femaleB;
+    } else if (primaryMale && !primaryFemale) {
+      voice = maleToggle++ % 2 === 0 ? ROLE_VOICES.maleA : ROLE_VOICES.maleB;
+    } else if (FEMALE_CUE.test(`${before} ${after}`) && !MALE_CUE.test(`${before} ${after}`)) {
+      voice = femaleToggle++ % 2 === 0 ? ROLE_VOICES.femaleA : ROLE_VOICES.femaleB;
+    } else {
+      voice = maleToggle++ % 2 === 0 ? ROLE_VOICES.maleA : ROLE_VOICES.maleB;
+    }
+    rawParts.push({ text: quote, voice });
+    lastIndex = match.index + match[0].length;
+  }
+
+  if (lastIndex < text.length) {
+    const tail = text.slice(lastIndex).trim();
+    if (tail) rawParts.push({ text: tail, voice: ROLE_VOICES.narrator });
+  }
+
+  if (!rawParts.length) {
+    return [{ text: text.trim(), voice: ROLE_VOICES.narrator }];
+  }
+
+  // 合并相邻同音色片段，减少上游合成次数
+  const merged = [];
+  for (const part of rawParts) {
+    const prev = merged[merged.length - 1];
+    if (prev && prev.voice === part.voice && prev.text.length + part.text.length < 360) {
+      prev.text = `${prev.text}\n${part.text}`;
+    } else {
+      merged.push({ ...part });
+    }
+  }
+  return merged;
+}
+
 // 生成 1 秒静音 WAV Blob URL，用于在弱网加载下一段音频时维持 iOS 后台音频会话不被系统挂起。
 function createSilentWavUrl() {
   const sampleRate = 8000;
@@ -62,16 +198,16 @@ function createSilentWavUrl() {
   view.setUint32(4, 36 + numSamples, true);
   writeStr(8, 'WAVE');
   writeStr(12, 'fmt ');
-  view.setUint32(16, 16, true); // PCM
-  view.setUint16(20, 1, true); // linear PCM
-  view.setUint16(22, 1, true); // mono
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
   view.setUint32(24, sampleRate, true);
   view.setUint32(28, sampleRate, true);
   view.setUint16(32, 1, true);
-  view.setUint16(34, 8, true); // 8-bit unsigned PCM
+  view.setUint16(34, 8, true);
   writeStr(36, 'data');
   view.setUint32(40, numSamples, true);
-  new Uint8Array(buffer, 44).fill(128); // 8-bit PCM 静音中点为 128
+  new Uint8Array(buffer, 44).fill(128);
   return URL.createObjectURL(new Blob([buffer], { type: 'audio/wav' }));
 }
 
@@ -82,7 +218,6 @@ function splitLongParagraph(text, startOffset, maxChars) {
     let end = Math.min(text.length, cursor + maxChars);
     if (end < text.length) {
       const slice = text.slice(cursor, end);
-      // 尽量在句末标点切分，保持停顿自然
       const punct = Math.max(
         slice.lastIndexOf('。'),
         slice.lastIndexOf('！'),
@@ -115,8 +250,7 @@ function splitLongParagraph(text, startOffset, maxChars) {
   return parts;
 }
 
-// 从指定正文和章节索引中切分朗读块：单块约 300~450 字（约 1.5~2.5 分钟），跨章强制切块。
-export function buildReadingChunks(text, chapters, maxChunkChars = 380) {
+export function buildReadingChunks(text, chapters, maxChunkChars = 360) {
   const chunks = [];
   for (let chapterIndex = 0; chapterIndex < chapters.length; chapterIndex++) {
     const chapter = chapters[chapterIndex];
@@ -189,26 +323,58 @@ export function getActiveVoice(settings) {
   return (settings.customVoice || '').trim() || settings.voice || DEFAULT_TTS_SETTINGS.voice;
 }
 
+export function getVoiceDisplayName(voiceId) {
+  const found = EDGE_VOICES.find(v => v.id === voiceId);
+  return found ? found.name : voiceId;
+}
+
+function buildTtsRequestBody(text, settings) {
+  const voice = getActiveVoice(settings);
+  if (voice === MULTI_ROLE_ID) {
+    const segments = segmentMultiRole(text);
+    if (segments.length > 1) {
+      return {
+        model: 'tts-1',
+        segments,
+        voice: ROLE_VOICES.narrator,
+        response_format: 'mp3',
+        speed: 1.0,
+      };
+    }
+    return {
+      model: 'tts-1',
+      input: segments[0].text,
+      voice: segments[0].voice,
+      response_format: 'mp3',
+      speed: 1.0,
+    };
+  }
+  return {
+    model: 'tts-1',
+    input: text,
+    voice,
+    response_format: 'mp3',
+    speed: 1.0,
+  };
+}
+
 export async function testTtsEndpoint(settings) {
   const endpoint = resolveApiEndpoint(settings.apiUrl);
-  const voice = getActiveVoice(settings);
   const headers = { 'Content-Type': 'application/json' };
   if (settings.apiKey?.trim()) headers.Authorization = `Bearer ${settings.apiKey.trim()}`;
 
+  const sampleText = getActiveVoice(settings) === MULTI_ROLE_ID
+    ? '夜色渐深，老周推开了门。“今天有你的新信。”她笑着接过信纸。'
+    : '页灯听书连接成功，祝你听书愉快。';
+
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 15000);
+  const timer = setTimeout(() => controller.abort(), 20000);
   try {
     const response = await fetch(endpoint, {
       method: 'POST',
       headers,
       signal: controller.signal,
-      body: JSON.stringify({
-        model: 'tts-1',
-        input: '页灯听书连接成功，祝你听书愉快。',
-        voice,
-        response_format: 'mp3',
-        speed: 1.0,
-      }),
+      body: JSON.stringify(buildTtsRequestBody(sampleText, settings)),
     });
     if (!response.ok) {
       const detail = await response.text().catch(() => '');
@@ -229,12 +395,12 @@ export class TtsController {
     this.active = false;
     this.playing = false;
     this.loading = false;
+    this.bookId = '';
     this.bookTitle = '';
     this.chunks = [];
     this.chunkIndex = -1;
     this.sessionToken = 0;
 
-    // 音频缓存：chunkIndex -> { promise, blobUrl }
     this.cache = new Map();
     this.audio = document.createElement('audio');
     this.audio.preload = 'auto';
@@ -245,8 +411,7 @@ export class TtsController {
     this.switching = false;
     this.lastTime = 0;
 
-    // 定时关闭
-    this.sleepMode = 'off'; // 'off' | '15' | '30' | '60' | 'chapter'
+    this.sleepMode = 'off';
     this.sleepUntil = 0;
     this.sleepInterval = null;
     this.wakeLock = null;
@@ -260,7 +425,6 @@ export class TtsController {
       this.playing = true;
       this.loading = false;
       this.#applyPlaybackRate();
-      // iOS 关键点：每次真正进入 playing 状态都重新绑定 MediaSession，避免锁屏按钮失效或切回 Apple Music
       this.#syncMediaSession();
       this.#emitState();
     });
@@ -337,7 +501,6 @@ export class TtsController {
       if (this.settings.engine === 'api') {
         this.#applyPlaybackRate();
       } else if (this.playing) {
-        // Web Speech API 需重新播当前块以应用新语速
         this.#playChunk(this.chunkIndex, { fromUser: true });
       }
     }
@@ -381,9 +544,10 @@ export class TtsController {
     return this.chunks[this.chunkIndex] ?? null;
   }
 
-  async start(bookTitle, text, chapters, startOffset) {
+  async start(bookId, bookTitle, text, chapters, startOffset) {
+    this.bookId = bookId;
     this.bookTitle = bookTitle;
-    this.chunks = buildReadingChunks(text, chapters, this.settings.engine === 'web' ? 180 : 380);
+    this.chunks = buildReadingChunks(text, chapters, this.settings.engine === 'web' ? 180 : 360);
     if (!this.chunks.length) {
       this.cb.onToast?.('当前书籍没有可朗读的正文。');
       return;
@@ -394,7 +558,6 @@ export class TtsController {
     const index = findChunkIndexAt(this.chunks, startOffset);
     this.chunkIndex = Math.max(0, index);
 
-    // 关键：在用户点击手势同步栈中先解锁 iOS 的 <audio> 音频会话
     if (this.settings.engine === 'api') {
       this.#primeAudioElement();
     }
@@ -410,7 +573,7 @@ export class TtsController {
       const promise = this.audio.play();
       if (promise?.catch) promise.catch(() => {});
     } catch {
-      // 忽略预热失败，正式播放时会再尝试
+      // 忽略预热失败
     }
   }
 
@@ -482,7 +645,7 @@ export class TtsController {
       try {
         window.speechSynthesis.cancel();
       } catch {
-        // 忽略部分旧浏览器异常
+        // 忽略异常
       }
     }
   }
@@ -554,7 +717,6 @@ export class TtsController {
     this.loading = true;
     this.#emitState();
 
-    // 若下一段尚未就绪，先切静音保活 WAV，避免 iOS 锁屏期间音频会话超时关闭
     const cached = this.cache.get(index);
     if (!cached?.blobUrl) {
       this.#enterSilentKeepAlive();
@@ -565,7 +727,7 @@ export class TtsController {
       if (token !== this.sessionToken || !this.active) return;
 
       this.inKeepAlive = false;
-      this.audio.loop = true; // iOS 锁屏防断流核心：禁止触发原生 ended 关闭会话
+      this.audio.loop = true;
       this.audio.src = blobUrl;
       this.#applyPlaybackRate();
       this.lastTime = 0;
@@ -580,7 +742,6 @@ export class TtsController {
       this.#syncMediaSession();
       this.#emitState();
 
-      // 静默预加载后续 2 段并清理远端旧缓存
       this.#prefetchAhead(index);
       this.#pruneCache(index);
     } catch (err) {
@@ -597,7 +758,7 @@ export class TtsController {
         return;
       }
       const hint = !this.settings.apiUrl?.trim()
-        ? '未检测到同源 TTS 服务，请点「设置」填写免费语音接口，或切换浏览器原生朗读。'
+        ? '未检测到同源 TTS 服务，请点「设置」检查接口，或切换浏览器原生朗读。'
         : `语音合成失败（${err?.message || '网络异常'}），可在「设置」测试接口或切换原生朗读。`;
       this.cb.onToast?.(hint);
       if (fromUser) this.cb.onNeedConfig?.();
@@ -612,7 +773,7 @@ export class TtsController {
       const promise = this.audio.play();
       if (promise?.catch) promise.catch(() => {});
     } catch {
-      // 忽略静音保活异常
+      // 忽略异常
     }
   }
 
@@ -622,26 +783,19 @@ export class TtsController {
 
     const chunk = this.chunks[index];
     const endpoint = resolveApiEndpoint(this.settings.apiUrl);
-    const voice = getActiveVoice(this.settings);
     const headers = { 'Content-Type': 'application/json' };
     if (this.settings.apiKey?.trim()) headers.Authorization = `Bearer ${this.settings.apiKey.trim()}`;
 
     const entry = { blobUrl: null, promise: null };
     entry.promise = (async () => {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 30000);
+      const timer = setTimeout(() => controller.abort(), 35000);
       try {
         const response = await fetch(endpoint, {
           method: 'POST',
           headers,
           signal: controller.signal,
-          body: JSON.stringify({
-            model: 'tts-1',
-            input: chunk.text,
-            voice,
-            response_format: 'mp3',
-            speed: 1.0,
-          }),
+          body: JSON.stringify(buildTtsRequestBody(chunk.text, this.settings)),
         });
         if (!response.ok) {
           const detail = await response.text().catch(() => '');
@@ -753,11 +907,10 @@ export class TtsController {
       navigator.mediaSession.setActionHandler('pause', () => { this.pause(); });
       navigator.mediaSession.setActionHandler('previoustrack', () => { this.stepChunk(-1); });
       navigator.mediaSession.setActionHandler('nexttrack', () => { this.stepChunk(1); });
-      // 清空快进/快退，使 iPhone 锁屏与灵动岛直接显示上一句/下一句按钮
       navigator.mediaSession.setActionHandler('seekbackward', null);
       navigator.mediaSession.setActionHandler('seekforward', null);
     } catch {
-      // 忽略不支持某项 MediaSession action 的浏览器
+      // 忽略异常
     }
   }
 
@@ -769,7 +922,7 @@ export class TtsController {
         navigator.mediaSession.setActionHandler(action, null);
       }
     } catch {
-      // 忽略清理异常
+      // 忽略异常
     }
   }
 
@@ -786,7 +939,7 @@ export class TtsController {
     try {
       await this.wakeLock?.release();
     } catch {
-      // 忽略释放异常
+      // 忽略异常
     }
     this.wakeLock = null;
   }
@@ -802,6 +955,7 @@ export class TtsController {
       rate: Number(this.settings.rate) || 1.0,
       engine: this.settings.engine,
       voice: getActiveVoice(this.settings),
+      voiceName: getVoiceDisplayName(getActiveVoice(this.settings)),
       sleepMode: this.sleepMode,
       sleepLabel: this.getSleepLabel(),
     });

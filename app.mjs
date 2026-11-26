@@ -1,6 +1,9 @@
 import { DEFAULT_SETTINGS, SAMPLE, decodeTxt, indexText, sectionAt, progressAt, isLowSurrogate } from './reader-core.mjs';
 import { listBooks, readText, saveBook, addBook, deleteBook } from './storage.mjs';
-import { TtsController, EDGE_VOICES, SLEEP_OPTIONS, testTtsEndpoint, resolveApiEndpoint } from './tts.mjs';
+import {
+  TtsController, EDGE_VOICES, SLEEP_OPTIONS,
+  testTtsEndpoint, resolveApiEndpoint, loadLastListened, saveLastListened,
+} from './tts.mjs';
 
 const $ = id => document.getElementById(id);
 const viewport = $('viewport');
@@ -40,23 +43,153 @@ function store(book) {
   return saveBook(book).catch(() => toast('保存阅读进度失败。'));
 }
 
+const SHELF_VIEW_KEY = 'yeding-shelf-view-v1';
+let shelfView = (() => {
+  try { return localStorage.getItem(SHELF_VIEW_KEY) === 'list' ? 'list' : 'grid'; } catch { return 'grid'; }
+})();
+let shelfFilter = 'all';
+let shelfQuery = '';
+
+function formatTimeAgo(ts) {
+  if (!ts) return '';
+  const diff = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (diff < 60) return '刚刚';
+  if (diff < 3600) return `${Math.floor(diff / 60)}分钟前`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}小时前`;
+  return `${Math.floor(diff / 86400)}天前`;
+}
+
+function renderResumeCard() {
+  const card = $('resumeListenCard');
+  const saved = loadLastListened();
+  let targetBook = saved ? books.find(b => b.id === saved.bookId) : null;
+  if (!targetBook) {
+    targetBook = books
+      .filter(b => b.ttsProgress?.offset != null)
+      .sort((a, b) => (b.ttsProgress.updatedAt || 0) - (a.ttsProgress.updatedAt || 0))[0] || null;
+  }
+  if (!targetBook) {
+    card.hidden = true;
+    card.replaceChildren();
+    return;
+  }
+  const prog = targetBook.ttsProgress || saved;
+  const percent = prog?.percent ?? progressAt(prog?.offset ?? targetBook.position, targetBook.length, targetBook.finished);
+  const tone = books.indexOf(targetBook) % 6;
+
+  const cover = element('div', Array.from(targetBook.title)[0] || '书', 'resume-cover');
+  cover.dataset.tone = String(tone < 0 ? 0 : tone);
+  const info = element('div', null, 'resume-info');
+  const ago = formatTimeAgo(prog?.updatedAt);
+  const chapterText = prog?.chapterTitle ? `${prog.chapterTitle} · ` : '';
+  info.append(
+    element('span', `🎧 上次听书${ago ? ` · ${ago}` : ''}`, 'resume-label'),
+    element('strong', targetBook.title, 'resume-title'),
+    element('span', `${chapterText}听到 ${percent}%`, 'resume-meta'),
+  );
+  const btn = button('▶ 继续听', () => openBookAndListen(targetBook), 'resume-btn');
+  card.replaceChildren(cover, info, btn);
+  card.hidden = false;
+}
+
 function renderShelf() {
-  books.sort((a, b) => (b.lastRead || b.created) - (a.lastRead || a.created));
-  $('bookList').replaceChildren(...books.map((book, i) => {
-    const row = element('div', null, 'book-row');
-    const open = button(null, () => openBook(book), 'book-open');
-    const cover = element('span', Array.from(book.title)[0], 'book-cover');
-    cover.dataset.tone = i % 4;
-    cover.setAttribute('aria-hidden', 'true');
-    const info = element('span', null, 'book-details');
-    const percent = progressAt(book.position, book.length, book.finished);
-    info.append(element('strong', book.title), element('small', book.finished ? '已读完' : `读到 ${percent}%`));
-    open.append(cover, info);
-    const actions = button('⋯', () => bookActions(book), 'icon-button');
-    actions.setAttribute('aria-label', `${book.title}的管理选项`);
-    row.append(open, actions);
-    return row;
-  }));
+  books.sort((a, b) => Math.max(b.lastRead || 0, b.ttsProgress?.updatedAt || 0, b.created || 0)
+    - Math.max(a.lastRead || 0, a.ttsProgress?.updatedAt || 0, a.created || 0));
+
+  $('shelfCount').textContent = books.length ? `共 ${books.length} 本 · 本机私密书库` : '本地私密书库';
+  $('viewToggle').textContent = shelfView === 'grid' ? '列表' : '宫格';
+  $('shelfTools').hidden = books.length === 0;
+  renderResumeCard();
+
+  const query = shelfQuery.trim().toLowerCase();
+  const filtered = books.filter(book => {
+    if (query && !book.title.toLowerCase().includes(query)) return false;
+    if (shelfFilter === 'listened') return Boolean(book.ttsProgress);
+    if (shelfFilter === 'finished') return Boolean(book.finished);
+    return true;
+  });
+
+  const list = $('bookList');
+  list.dataset.view = shelfView;
+
+  if (books.length && !filtered.length) {
+    list.replaceChildren(element('p', '没有符合条件的书籍。', 'shelf-empty-filter'));
+  } else if (shelfView === 'grid') {
+    const cards = filtered.map((book, i) => {
+      const card = element('div', null, 'book-card');
+      const open = button(null, () => openBook(book), 'book-card-open');
+      const tone = i % 6;
+      const hasAudio = Boolean(book.ttsProgress);
+      const readPct = progressAt(book.position, book.length, book.finished);
+      const displayPct = hasAudio ? (book.ttsProgress.percent ?? readPct) : readPct;
+
+      const cover = element('div', null, 'book-cover-3d');
+      cover.dataset.tone = String(tone);
+      cover.append(
+        element('span', book.title, 'book-cover-title'),
+        element('span', hasAudio ? '🎧 听书' : 'TXT', `book-cover-tag${hasAudio ? ' is-audio' : ''}`),
+      );
+      const name = element('span', book.title, 'book-card-name');
+      const bar = element('span', null, 'book-mini-bar');
+      const fill = element('span');
+      fill.style.width = `${displayPct}%`;
+      bar.append(fill);
+
+      const metaText = book.finished
+        ? '已读完'
+        : hasAudio
+          ? `听到 ${displayPct}%`
+          : readPct > 0 ? `读到 ${readPct}%` : '未读';
+      const meta = element('span', metaText, `book-card-meta${hasAudio && !book.finished ? ' is-audio' : ''}`);
+      open.append(cover, name, bar, meta);
+
+      const more = button('⋯', event => {
+        event.stopPropagation();
+        bookActions(book);
+      }, 'book-card-more');
+      more.setAttribute('aria-label', `${book.title}的管理选项`);
+      card.append(open, more);
+      return card;
+    });
+
+    const addCard = button(null, () => $('fileInput').click(), 'add-book-card');
+    addCard.append(element('span', '＋'), element('span', '导入 TXT'));
+    cards.push(addCard);
+    list.replaceChildren(...cards);
+  } else {
+    list.replaceChildren(...filtered.map((book, i) => {
+      const row = element('div', null, 'book-row');
+      const open = button(null, () => openBook(book), 'book-open');
+      const cover = element('span', Array.from(book.title)[0] || '书', 'book-cover');
+      cover.dataset.tone = String(i % 6);
+      cover.setAttribute('aria-hidden', 'true');
+      const info = element('span', null, 'book-details');
+      const hasAudio = Boolean(book.ttsProgress);
+      const readPct = progressAt(book.position, book.length, book.finished);
+      const metaText = book.finished
+        ? '已读完'
+        : hasAudio
+          ? `🎧 ${book.ttsProgress.chapterTitle ? `${book.ttsProgress.chapterTitle} · ` : ''}听到 ${book.ttsProgress.percent ?? readPct}%`
+          : `读到 ${readPct}%`;
+      const meta = element('small', metaText, hasAudio && !book.finished ? 'is-audio' : '');
+      const bar = element('span', null, 'book-mini-bar');
+      const fill = element('span');
+      fill.style.width = `${hasAudio ? (book.ttsProgress.percent ?? readPct) : readPct}%`;
+      bar.append(fill);
+      info.append(element('strong', book.title), meta, bar);
+      open.append(cover, info);
+
+      const children = [open];
+      if (hasAudio) {
+        children.push(button('🎧 续听', () => openBookAndListen(book), 'row-listen-btn'));
+      }
+      const actions = button('⋯', () => bookActions(book), 'icon-button');
+      actions.setAttribute('aria-label', `${book.title}的管理选项`);
+      children.push(actions);
+      row.append(...children);
+      return row;
+    }));
+  }
   $('empty').hidden = books.some(book => book.id === SAMPLE.id);
 }
 
@@ -87,20 +220,38 @@ async function exportTxt(book) {
 }
 
 function bookActions(book) {
-  openDialog(book.title, button('导出 TXT', () => exportTxt(book), 'dialog-item'), button('从书架删除', () => {
-    openDialog('删除这本书？', element('p', `《${book.title}》及其阅读进度和书签将从这台设备移除。`), button('确认删除', async event => {
-      event.currentTarget.disabled = true;
-      try {
-        await deleteBook(book.id);
-        books = books.filter(item => item.id !== book.id);
-        renderShelf();
-        dialog.close();
-      } catch {
-        dialog.close();
-        toast('删除失败。');
-      }
-    }, 'primary'));
-  }, 'dialog-item'));
+  const items = [];
+  if (book.ttsProgress) {
+    const pct = book.ttsProgress.percent ?? progressAt(book.ttsProgress.offset, book.length, book.finished);
+    items.push(button(`🎧 继续听书（${book.ttsProgress.chapterTitle || '上次位置'} · ${pct}%）`, () => {
+      dialog.close();
+      openBookAndListen(book);
+    }, 'dialog-item'));
+  } else {
+    items.push(button('🎧 开始听这本书', () => {
+      dialog.close();
+      openBookAndListen(book);
+    }, 'dialog-item'));
+  }
+  items.push(
+    button('导出 TXT', () => exportTxt(book), 'dialog-item'),
+    button('从书架删除', () => {
+      openDialog('删除这本书？', element('p', `《${book.title}》及其阅读进度和书签将从这台设备移除。`), button('确认删除', async event => {
+        event.currentTarget.disabled = true;
+        try {
+          await deleteBook(book.id);
+          books = books.filter(item => item.id !== book.id);
+          if (loadLastListened()?.bookId === book.id) saveLastListened(null);
+          renderShelf();
+          dialog.close();
+        } catch {
+          dialog.close();
+          toast('删除失败。');
+        }
+      }, 'primary'));
+    }, 'dialog-item'),
+  );
+  openDialog(book.title, ...items);
 }
 
 function makeBook(id, title, text) {
@@ -602,12 +753,69 @@ $('sampleBtn').onclick = async event => {
 $('backShelf').onclick = closeReader;
 $('hideMenu').onclick = () => setMenu(false);
 $('menuToggle').onclick = () => setMenu($('readerMenus').hidden);
+async function openBookAndListen(book) {
+  const resumeOffset = book.ttsProgress?.offset ?? book.position ?? 0;
+  await openBook(book);
+  if (!active || active.book.id !== book.id) return;
+  ttsBarCollapsed = false;
+  await tts.start(active.book.id, active.book.title, active.text, active.chapters, resumeOffset);
+}
+
+$('viewToggle').onclick = () => {
+  shelfView = shelfView === 'grid' ? 'list' : 'grid';
+  try { localStorage.setItem(SHELF_VIEW_KEY, shelfView); } catch {}
+  renderShelf();
+};
+$('shelfSearch').oninput = event => {
+  shelfQuery = event.target.value;
+  renderShelf();
+};
+for (const btn of $('shelfFilter').querySelectorAll('button')) {
+  btn.onclick = () => {
+    shelfFilter = btn.dataset.filter;
+    for (const item of $('shelfFilter').querySelectorAll('button')) {
+      item.setAttribute('aria-selected', String(item === btn));
+    }
+    renderShelf();
+  };
+}
+
 $('tocBtn').onclick = toc;
-$('listenBtn').onclick = () => {
+function startOrToggleListen({ preferSaved = false } = {}) {
   if (!active) return;
   setMenu(false);
-  if (tts.active) tts.togglePlay();
-  else tts.start(active.book.title, active.text, active.chapters, active.book.position);
+  if (tts.active) {
+    if (ttsBarCollapsed) {
+      ttsBarCollapsed = false;
+      $('ttsBar').hidden = false;
+    } else {
+      tts.togglePlay();
+    }
+    return;
+  }
+  ttsBarCollapsed = false;
+  const saved = active.book.ttsProgress;
+  const startAt = preferSaved && saved?.offset != null ? saved.offset : active.book.position;
+  tts.start(active.book.id, active.book.title, active.text, active.chapters, startAt);
+  if (!preferSaved && saved?.offset != null && Math.abs(saved.offset - active.book.position) > 400) {
+    toast('已从当前页开始听（点「定时」可回到上次听书点）');
+  }
+}
+
+$('listenBtn').onclick = () => startOrToggleListen();
+$('quickListenBtn').onclick = () => {
+  if (!active) return;
+  if (tts.active) {
+    ttsBarCollapsed = !ttsBarCollapsed;
+    $('ttsBar').hidden = ttsBarCollapsed;
+    requestAnimationFrame(() => {
+      if (active) jumpTo(active.book.position, { keepFinished: active.book.finished, fromTts: true });
+    });
+    return;
+  }
+  const hasSaved = active.book.ttsProgress?.offset != null;
+  const closeToSaved = hasSaved && Math.abs(active.book.ttsProgress.offset - active.book.position) <= 400;
+  startOrToggleListen({ preferSaved: closeToSaved });
 };
 $('bookmarksBtn').onclick = bookmarks;
 $('markBtn').onclick = addMark;
@@ -615,6 +823,31 @@ $('settingsBtn').onclick = settings;
 
 const RATE_STEPS = [1.0, 1.25, 1.5, 1.75, 2.0, 0.85];
 let highlightedChunk = null;
+let ttsBarCollapsed = false;
+
+function persistListeningProgress(chunk) {
+  if (!active || !chunk) return;
+  const { book } = active;
+  const percent = progressAt(chunk.start, book.length, book.finished);
+  const record = {
+    bookId: book.id,
+    bookTitle: book.title,
+    offset: chunk.start,
+    chapterTitle: chunk.chapterTitle || '',
+    snippet: chunk.text.replace(/\s+/g, ' ').slice(0, 36),
+    percent,
+    updatedAt: Date.now(),
+  };
+  book.ttsProgress = {
+    offset: record.offset,
+    chapterTitle: record.chapterTitle,
+    snippet: record.snippet,
+    percent: record.percent,
+    updatedAt: record.updatedAt,
+  };
+  saveLastListened(record);
+  store(book);
+}
 
 function syncTtsHighlight(chunk = highlightedChunk) {
   highlightedChunk = chunk;
@@ -627,15 +860,24 @@ function syncTtsHighlight(chunk = highlightedChunk) {
 
 function renderTtsBar(state) {
   const bar = $('ttsBar');
+  const quickBtn = $('quickListenBtn');
   const wasHidden = bar.hidden;
-  bar.hidden = !state.active;
-  if (!state.active) return;
+  if (!state.active) {
+    ttsBarCollapsed = false;
+    bar.hidden = true;
+    quickBtn.textContent = '🎧 听书';
+    quickBtn.dataset.listening = 'false';
+    return;
+  }
 
-  const engineLabel = state.engine === 'api' ? 'AI 语音' : '原生朗读';
-  const snippet = state.chunk?.text?.replace(/\s+/g, ' ').slice(0, 26) || '';
+  bar.hidden = ttsBarCollapsed;
+  quickBtn.dataset.listening = 'true';
+  quickBtn.textContent = state.loading ? '🎧 缓冲…' : state.playing ? '🎧 听书中' : '🎧 已暂停';
+
+  const snippet = state.chunk?.text?.replace(/\s+/g, ' ').slice(0, 22) || '';
   const chapter = state.chunk?.chapterTitle || '';
-  const prefix = state.loading ? '正在合成… ' : state.playing ? '正在听 · ' : '已暂停 · ';
-  $('ttsStatus').textContent = `${prefix}${chapter ? `${chapter} · ` : ''}${snippet || engineLabel}`;
+  const prefix = state.loading ? '合成中… ' : state.playing ? `${state.voiceName || '听书中'} · ` : '已暂停 · ';
+  $('ttsStatus').textContent = `${prefix}${chapter ? `${chapter} · ` : ''}${snippet}`;
 
   $('ttsPlay').textContent = state.loading ? '缓冲…' : state.playing ? '暂停' : '播放';
   $('ttsRate').textContent = `${Number(state.rate).toFixed(2).replace(/\.?0+$/, '')}x`;
@@ -644,7 +886,7 @@ function renderTtsBar(state) {
   $('ttsPrev').disabled = state.chunkIndex <= 0;
   $('ttsNext').disabled = state.chunkIndex >= state.totalChunks - 1;
 
-  if (wasHidden && active) {
+  if (wasHidden && !bar.hidden && active) {
     requestAnimationFrame(() => {
       if (active) jumpTo(active.book.position, { keepFinished: active.book.finished, fromTts: true });
     });
@@ -654,6 +896,7 @@ function renderTtsBar(state) {
 const tts = new TtsController({
   onChunkChange(chunk) {
     if (!active) return;
+    persistListeningProgress(chunk);
     jumpTo(chunk.start, { fromTts: true });
   },
   onHighlight(chunk) {
@@ -688,14 +931,28 @@ function openSleepDialog() {
   }
   wrap.append(element('p', '定时暂停播放'), items);
 
-  const reread = button('从当前页重新开始朗读', () => {
+  const extra = [];
+  const saved = active?.book?.ttsProgress;
+  if (saved?.offset != null) {
+    const pct = saved.percent ?? progressAt(saved.offset, active.book.length, active.book.finished);
+    const backBtn = button(`回到上次听书位置（${saved.chapterTitle || '断点'} · ${pct}%）`, () => {
+      dialog.close();
+      if (active) tts.start(active.book.id, active.book.title, active.text, active.chapters, saved.offset);
+    }, 'primary');
+    backBtn.style.width = '100%';
+    backBtn.style.marginTop = '12px';
+    extra.push(backBtn);
+  }
+
+  const reread = button('从当前阅读页重新开始朗读', () => {
     dialog.close();
-    if (active) tts.start(active.book.title, active.text, active.chapters, active.book.position);
+    if (active) tts.start(active.book.id, active.book.title, active.text, active.chapters, active.book.position);
   }, 'secondary');
   reread.style.width = '100%';
-  reread.style.marginTop = '12px';
+  reread.style.marginTop = '8px';
+  extra.push(reread);
 
-  openDialog('听书定时', wrap, reread);
+  openDialog('定时与续听', wrap, ...extra);
 }
 
 function openTtsSettings() {
@@ -711,7 +968,7 @@ function openTtsSettings() {
     webFields.hidden = mode !== 'web';
   };
 
-  for (const [value, label] of [['api', '在线 AI 语音（锁屏连播）'], ['web', '浏览器原生（离线）']]) {
+  for (const [value, label] of [['api', '智能朗读（锁屏连播）'], ['web', '离线原生朗读']]) {
     const item = button(label, () => {
       tts.updateSettings({ engine: value });
       for (const entry of engineChoices.children) entry.setAttribute('aria-pressed', String(entry === item));
@@ -720,11 +977,23 @@ function openTtsSettings() {
     item.setAttribute('aria-pressed', String(cfg.engine === value));
     engineChoices.append(item);
   }
-  engineRow.append(
-    element('p', '语音引擎'),
-    engineChoices,
-    element('p', 'iPhone 锁屏连播需使用「在线 AI 语音」，可免费部署到自家电脑或 Cloudflare 自定义域名，国内直连无需代理。', 'tts-hint'),
-  );
+  engineRow.append(element('p', '朗读模式'), engineChoices);
+
+  // 番茄风格 2 列音色卡片
+  const voiceRow = element('div', null, 'settings-row');
+  const voiceGrid = element('div', null, 'voice-grid');
+  for (const v of EDGE_VOICES) {
+    const card = button(null, () => {
+      tts.updateSettings({ voice: v.id, customVoice: '' });
+      for (const entry of voiceGrid.children) entry.setAttribute('aria-pressed', String(entry === card));
+      toast(`已切换音色：${v.name}`);
+    }, 'voice-card');
+    card.setAttribute('aria-pressed', String(!cfg.customVoice && cfg.voice === v.id));
+    if (v.badge) card.append(element('span', v.badge, 'voice-badge'));
+    card.append(element('strong', v.name), element('small', v.desc));
+    voiceGrid.append(card);
+  }
+  voiceRow.append(element('p', '音色设置'), voiceGrid);
 
   // 语速调节
   const rateRow = element('div', null, 'settings-row');
@@ -742,35 +1011,25 @@ function openTtsSettings() {
   };
   rateRow.append(rateLabel, rateInput);
 
-  // 在线 AI 语音配置区
-  const voiceRow = element('div', null, 'settings-row');
-  const voiceSelect = element('select', null, 'encoding-select');
-  voiceSelect.setAttribute('aria-label', 'AI 主播音色');
-  for (const v of EDGE_VOICES) {
-    const opt = element('option', v.label);
-    opt.value = v.id;
-    if (v.id === cfg.voice) opt.selected = true;
-    voiceSelect.append(opt);
-  }
-  voiceSelect.onchange = () => tts.updateSettings({ voice: voiceSelect.value });
+  // 高级自定义接口折叠区（默认同源免配置，保持界面像番茄一样清爽）
+  const adv = element('details', null, 'tts-advanced');
+  adv.append(element('summary', '高级设置（自定义接口 / 试听测试）'));
 
   const customVoiceInput = element('input', null, 'tts-url-input');
   customVoiceInput.type = 'text';
-  customVoiceInput.placeholder = '可选：自定义音色 ID（留空使用上方预设）';
+  customVoiceInput.placeholder = '可选：自定义音色 ID（留空用上方卡片）';
   customVoiceInput.value = cfg.customVoice || '';
   customVoiceInput.onchange = () => tts.updateSettings({ customVoice: customVoiceInput.value.trim() });
-  voiceRow.append(element('p', '主播音色'), voiceSelect, customVoiceInput);
 
-  const apiRow = element('div', null, 'settings-row');
   const urlInput = element('input', null, 'tts-url-input');
   urlInput.type = 'url';
-  urlInput.placeholder = '留空默认使用同源 /api/tts，或填 https://tts.域名.com/v1/audio/speech';
+  urlInput.placeholder = '留空默认用本站免费接口 /api/tts';
   urlInput.value = cfg.apiUrl || '';
   urlInput.onchange = () => tts.updateSettings({ apiUrl: urlInput.value.trim() });
 
   const keyInput = element('input', null, 'tts-url-input');
   keyInput.type = 'password';
-  keyInput.placeholder = '可选：访问密钥 API Key（服务端未设则留空）';
+  keyInput.placeholder = '可选：访问密钥 API Key';
   keyInput.value = cfg.apiKey || '';
   keyInput.onchange = () => tts.updateSettings({ apiKey: keyInput.value.trim() });
 
@@ -779,11 +1038,10 @@ function openTtsSettings() {
     tts.updateSettings({
       apiUrl: urlInput.value.trim(),
       apiKey: keyInput.value.trim(),
-      voice: voiceSelect.value,
       customVoice: customVoiceInput.value.trim(),
     });
     testBtn.disabled = true;
-    testBtn.textContent = '连接测试中…';
+    testBtn.textContent = '试听合成中…';
     try {
       const { blob } = await testTtsEndpoint(tts.settings);
       const previewUrl = URL.createObjectURL(blob);
@@ -792,32 +1050,31 @@ function openTtsSettings() {
       await preview.play();
       toast('连接成功，正在播放试听。');
     } catch (err) {
-      toast(`连接失败：${err?.message || '请检查地址或跨域配置'}`);
+      toast(`连接失败：${err?.message || '请检查网络'}`);
     } finally {
       testBtn.disabled = false;
       testBtn.textContent = '测试连接并试听';
     }
   }, 'primary');
-  const startNowBtn = button('保存并开始听书', () => {
+  const startNowBtn = button('立即开始听书', () => {
     tts.updateSettings({
       apiUrl: urlInput.value.trim(),
       apiKey: keyInput.value.trim(),
-      voice: voiceSelect.value,
       customVoice: customVoiceInput.value.trim(),
     });
     dialog.close();
-    if (active) tts.start(active.book.title, active.text, active.chapters, active.book.position);
+    if (active) tts.start(active.book.id, active.book.title, active.text, active.chapters, active.book.position);
   }, 'secondary');
   testRow.append(testBtn, startNowBtn);
 
-  apiRow.append(
-    element('p', '免费 Edge-TTS / OpenAI 兼容接口'),
+  adv.append(
+    element('p', `当前语音接口：${resolveApiEndpoint(cfg.apiUrl)}`, 'tts-hint'),
     urlInput,
     keyInput,
-    element('p', `当前请求地址：${resolveApiEndpoint(cfg.apiUrl)}`, 'tts-hint'),
+    customVoiceInput,
     testRow,
   );
-  apiFields.append(voiceRow, apiRow);
+  apiFields.append(voiceRow, adv);
 
   // 浏览器原生朗读配置区
   const webRow = element('div', null, 'settings-row');
@@ -840,19 +1097,26 @@ function openTtsSettings() {
   if ('speechSynthesis' in window) window.speechSynthesis.onvoiceschanged = fillWebVoices;
   webVoiceSelect.onchange = () => tts.updateSettings({ webVoice: webVoiceSelect.value });
   webRow.append(
-    element('p', '系统语音（无需服务器、可离线）'),
+    element('p', '系统语音（无需网络、可离线）'),
     webVoiceSelect,
-    element('p', '提示：浏览器原生朗读在 iPhone 锁屏后可能被系统暂停；锁屏连续听书建议切回「在线 AI 语音」。', 'tts-hint'),
+    element('p', '提示：浏览器原生朗读在 iPhone 锁屏后可能被系统暂停；锁屏连播建议使用「智能朗读」。', 'tts-hint'),
   );
   webFields.append(webRow);
 
   syncEngineVisibility(cfg.engine);
-  openDialog('听书设置', engineRow, rateRow, apiFields, webFields);
+  openDialog('音色设置', apiFields, webFields, rateRow, engineRow);
 }
 
 $('ttsPlay').onclick = () => tts.togglePlay();
 $('ttsPrev').onclick = () => tts.stepChunk(-1);
 $('ttsNext').onclick = () => tts.stepChunk(1);
+$('ttsCollapse').onclick = () => {
+  ttsBarCollapsed = true;
+  $('ttsBar').hidden = true;
+  requestAnimationFrame(() => {
+    if (active) jumpTo(active.book.position, { keepFinished: active.book.finished, fromTts: true });
+  });
+};
 $('ttsClose').onclick = () => tts.stop();
 $('ttsRate').onclick = () => {
   const idx = RATE_STEPS.indexOf(Number(tts.settings.rate));
