@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f8f3e9">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <title>页灯 · TXT 小说阅读器</title>
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icon-192.png">
+  <link rel="apple-touch-icon" href="./apple-touch-icon.png">
+  <link rel="stylesheet" href="./styles.css">
+  <script type="module" src="./app.mjs"></script>
+</head>
+<body>
+  <div id="library" class="library">
+    <header class="brand"><img src="./icon-192.png" alt="" width="38" height="38"><span>页灯</span></header>
+    <main class="shelf">
+      <div class="shelf-heading">
+        <div><h1>我的书架</h1><p>导入手机里的 TXT，小说保存在这台设备上。</p></div>
+        <button id="importBtn" class="primary" type="button">＋ 导入 TXT</button>
+        <input id="fileInput" type="file" accept=".txt,text/plain" hidden>
+      </div>
+      <div id="bookList" class="book-list"></div>
+      <section id="empty" class="empty">
+        <div class="sample-cover" aria-hidden="true"><span>山里的<br>邮局</span><span class="cover-mark">页灯</span></div>
+        <div><h2>先读一篇样章</h2><p>试试翻页、目录和夜间模式。</p><button id="sampleBtn" type="button">阅读《山里的邮局》 →</button></div>
+      </section>
+      <p id="offlineStatus" class="storage-note" role="status" hidden></p>
+      <p class="storage-note">清除网站数据会移除书架。可从书架导出 TXT 备份。</p>
+    </main>
+  </div>
+
+  <section id="reader" class="reader" aria-label="小说阅读器" hidden>
+    <div class="reader-heading"><span id="chapterLabel"></span><span id="bookLabel"></span></div>
+    <div id="viewport" class="viewport" tabindex="0" aria-label="小说正文">
+      <article id="passage" class="passage"></article>
+      <div id="sectionNav" class="section-nav"><button id="prevSection" type="button">上一段</button><button id="nextSection" type="button">下一段</button></div>
+    </div>
+    <footer class="reader-footer"><button id="menuToggle" type="button" aria-label="阅读菜单" aria-expanded="false">☰</button><span id="readPercent">0%</span></footer>
+    <div id="readerMenus" hidden>
+      <header class="reader-toolbar"><button id="backShelf" type="button">‹ 书架</button><span id="toolbarTitle"></span><button id="hideMenu" type="button" aria-label="关闭阅读菜单">×</button></header>
+      <div class="reading-tools">
+        <div class="jump"><label for="progress">全书进度</label><input id="progress" type="range" min="0" max="1000" value="0"><span id="jumpValue">0%</span></div>
+        <nav aria-label="阅读工具"><button id="tocBtn" type="button">目录</button><button id="bookmarksBtn" type="button">书签</button><button id="markBtn" type="button">加书签</button><button id="settingsBtn" type="button">Aa 设置</button></nav>
+      </div>
+    </div>
+  </section>
+
+  <dialog id="dialog" aria-labelledby="dialogTitle">
+    <header class="dialog-header"><h2 id="dialogTitle"></h2><button id="closeDialog" type="button" aria-label="关闭">×</button></header>
+    <div id="dialogBody"></div>
+  </dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
