@@ -692,6 +692,15 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden && scrollTimer) updateScrollPosition();
 });
 
+// 手机上不需要双指缩放或双击放大，字号由阅读设置控制。
+for (const type of ['gesturestart', 'gesturechange', 'gestureend']) {
+  document.addEventListener(type, event => event.preventDefault(), { passive: false });
+}
+document.addEventListener('touchmove', event => {
+  if (event.touches.length > 1) event.preventDefault();
+}, { passive: false });
+document.addEventListener('dblclick', event => event.preventDefault(), { passive: false });
+
 try {
   books = await listBooks();
   renderShelf();

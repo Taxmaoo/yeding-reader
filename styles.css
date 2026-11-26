@@ -52,9 +52,9 @@ body[data-theme="night"] {
 
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
-html { background: var(--paper); }
+html { background: var(--paper); touch-action: pan-x pan-y; }
 body { margin: 0; background: var(--paper); color: var(--ink); }
-body.reading { overflow: hidden; }
+body.reading { overflow: hidden; touch-action: pan-y; }
 button, input, select { font: inherit; }
 button { cursor: pointer; color: inherit; }
 button:disabled { cursor: default; opacity: .45; }
@@ -205,7 +205,7 @@ input[type="range"] { min-width: 0; accent-color: var(--accent); }
 #readPercent { font-variant-numeric: tabular-nums; }
 .viewport { position: relative; flex: 1 1 0; min-height: 0; scrollbar-width: none; }
 .viewport::-webkit-scrollbar { display: none; }
-.viewport[data-mode="page"] { overflow: hidden; touch-action: pan-y pinch-zoom; }
+.viewport[data-mode="page"] { overflow: hidden; touch-action: pan-y; }
 .viewport[data-mode="page"] .passage {
   height: 100%;
   column-count: 1;
@@ -213,7 +213,7 @@ input[type="range"] { min-width: 0; accent-color: var(--accent); }
   column-fill: auto;
 }
 .viewport[data-mode="page"] .section-nav { display: none; }
-.viewport[data-mode="scroll"] { overflow: hidden auto; overscroll-behavior: contain; }
+.viewport[data-mode="scroll"] { overflow: hidden auto; overscroll-behavior: contain; touch-action: pan-y; }
 .passage {
   font-family: var(--reader-font);
   font-size: var(--reader-size);
