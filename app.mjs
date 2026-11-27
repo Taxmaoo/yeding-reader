@@ -1,9 +1,9 @@
-import { DEFAULT_SETTINGS, SAMPLE, decodeTxt, indexText, sectionAt, progressAt, isLowSurrogate } from './reader-core.mjs?v=15';
-import { listBooks, readText, saveBook, addBook, deleteBook } from './storage.mjs?v=15';
+import { DEFAULT_SETTINGS, SAMPLE, decodeTxt, indexText, sectionAt, progressAt, isLowSurrogate } from './reader-core.mjs?v=16';
+import { listBooks, readText, saveBook, addBook, deleteBook } from './storage.mjs?v=16';
 import {
   TtsController, EDGE_VOICES, SLEEP_OPTIONS,
   testTtsEndpoint, resolveApiEndpoint, loadLastListened, saveLastListened,
-} from './tts.mjs?v=15';
+} from './tts.mjs?v=16';
 
 const $ = id => document.getElementById(id);
 const viewport = $('viewport');
@@ -553,6 +553,9 @@ function snapTocToCurrent(smooth = false) {
   const scroller = list?.closest('.toc-scroll');
   const current = list?.querySelector('[aria-current="location"]');
   if (!scroller || !current) return;
+  // 动态补足底部可滚高度，确保哪怕读到最后一章也能精准顶到第 1 行
+  const tailPad = Math.max(48, Math.ceil(scroller.clientHeight - current.offsetHeight));
+  list.style.paddingBottom = `${tailPad}px`;
   const targetTop = Math.max(0, current.offsetTop);
   if (smooth && scroller.scrollTo) scroller.scrollTo({ top: targetTop, behavior: 'smooth' });
   else scroller.scrollTop = targetTop;
