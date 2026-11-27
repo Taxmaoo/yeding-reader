@@ -541,10 +541,10 @@ input[type="range"] { min-width: 0; accent-color: var(--accent); }
   padding-top: var(--safe-top);
   border-bottom: 1px solid var(--line);
 }
-.toolbar-right { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
-.reader-toolbar button { padding: 0 6px; color: var(--ink); white-space: nowrap; font-size: 14px; }
+.toolbar-right { display: flex; flex-wrap: nowrap; align-items: center; gap: 6px; flex: 0 0 auto; }
+.reader-toolbar button { flex: 0 0 auto; padding: 0 6px; color: var(--ink); white-space: nowrap; font-size: 14px; }
 .reader-toolbar #hideMenu { font-size: 22px; color: var(--muted); }
-.reader-toolbar span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 600; }
+.reader-toolbar span { flex: 1 1 auto; min-width: 0; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 600; }
 .reading-tools { bottom: 0; padding-bottom: var(--safe-bottom); border-top: 1px solid var(--line); }
 .jump {
   display: grid;

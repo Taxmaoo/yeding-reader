@@ -10,8 +10,8 @@
   <link rel="manifest" href="./manifest.webmanifest">
   <link rel="icon" href="./icon-192.png">
   <link rel="apple-touch-icon" href="./apple-touch-icon.png">
-  <link rel="stylesheet" href="./styles.css">
-  <script type="module" src="./app.mjs"></script>
+  <link rel="stylesheet" href="./styles.css?v=14">
+  <script type="module" src="./app.mjs?v=14"></script>
 </head>
 <body>
   <div id="library" class="library">
@@ -84,10 +84,10 @@
           <button id="nextChapterMenu" class="chapter-jump" type="button" aria-label="下一章">下一章</button>
         </div>
         <nav aria-label="阅读工具">
-          <button id="tocBtn" type="button"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 9h8M8 13h8M8 17h5"/></svg></span><small>目录</small></button>
-          <button id="bookmarksBtn" type="button"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 4h12v17l-6-4-6 4V4z"/></svg></span><small>书签</small></button>
-          <button id="nightToggleBtn" type="button"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M19 14.5A7.5 7.5 0 0 1 9.5 5a7.5 7.5 0 1 0 9.5 9.5z"/></svg></span><small id="nightLabel">夜间</small></button>
-          <button id="settingsBtn" type="button"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3l7.5 4.3v9.4L12 21l-7.5-4.3V7.3L12 3z"/><circle cx="12" cy="12" r="2.2"/></svg></span><small>设置</small></button>
+          <button id="tocBtn" type="button"><span class="nav-ico" aria-hidden="true"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 9h8M8 13h8M8 17h5"/></svg></span><small>目录</small></button>
+          <button id="bookmarksBtn" type="button"><span class="nav-ico" aria-hidden="true"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4h12v17l-6-4-6 4V4z"/></svg></span><small>书签</small></button>
+          <button id="nightToggleBtn" type="button"><span class="nav-ico" aria-hidden="true"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><path d="M19 14.5A7.5 7.5 0 0 1 9.5 5a7.5 7.5 0 1 0 9.5 9.5z"/></svg></span><small id="nightLabel">夜间</small></button>
+          <button id="settingsBtn" type="button"><span class="nav-ico" aria-hidden="true"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7.5 4.3v9.4L12 21l-7.5-4.3V7.3L12 3z"/><circle cx="12" cy="12" r="2.2"/></svg></span><small>设置</small></button>
         </nav>
       </div>
     </div>
@@ -127,10 +127,10 @@
 
     <div class="listen-panel">
       <div class="listen-action-bar">
-        <button id="listenRateBtn" type="button"><span class="la-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2M9.5 2h5"/></svg></span><small id="listenRateLabel">1.0x</small></button>
-        <button id="listenToReaderBtn" type="button"><span class="la-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H12v17H6.5A2.5 2.5 0 0 0 4 22V5.5zM20 5.5A2.5 2.5 0 0 0 17.5 3H12v17h5.5a2.5 2.5 0 0 1 2.5 2V5.5z"/></svg></span><small>看正文</small></button>
-        <button id="listenVoiceMoreBtn" type="button"><span class="la-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"/></svg></span><small>音色</small></button>
-        <button id="listenMoreBtn" type="button"><span class="la-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="8.5" cy="12" r="1" fill="currentColor"/><circle cx="12" cy="12" r="1" fill="currentColor"/><circle cx="15.5" cy="12" r="1" fill="currentColor"/></svg></span><small>设置</small></button>
+        <button id="listenRateBtn" type="button"><span class="la-ico" aria-hidden="true"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2M9.5 2h5"/></svg></span><small id="listenRateLabel">1.0x</small></button>
+        <button id="listenToReaderBtn" type="button"><span class="la-ico" aria-hidden="true"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H12v17H6.5A2.5 2.5 0 0 0 4 22V5.5zM20 5.5A2.5 2.5 0 0 0 17.5 3H12v17h5.5a2.5 2.5 0 0 1 2.5 2V5.5z"/></svg></span><small>看正文</small></button>
+        <button id="listenVoiceMoreBtn" type="button"><span class="la-ico" aria-hidden="true"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"/></svg></span><small>音色</small></button>
+        <button id="listenMoreBtn" type="button"><span class="la-ico" aria-hidden="true"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="8.5" cy="12" r="1" fill="currentColor"/><circle cx="12" cy="12" r="1" fill="currentColor"/><circle cx="15.5" cy="12" r="1" fill="currentColor"/></svg></span><small>设置</small></button>
       </div>
 
       <div class="listen-progress-row">
@@ -140,11 +140,11 @@
       </div>
 
       <div class="listen-transport">
-        <button id="listenTocBtn" class="listen-side-btn" type="button"><span class="lt-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h11"/></svg></span><small>目录</small></button>
+        <button id="listenTocBtn" class="listen-side-btn" type="button"><span class="lt-ico" aria-hidden="true"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h16M4 17h11"/></svg></span><small>目录</small></button>
         <button id="listenPrevBtn" class="listen-skip-btn" type="button" aria-label="上一段">⏮</button>
         <button id="listenPlayBtn" class="listen-play-btn" type="button" aria-label="播放或暂停">⏸</button>
         <button id="listenNextBtn" class="listen-skip-btn" type="button" aria-label="下一段">⏭</button>
-        <button id="listenSleepBtn" class="listen-side-btn" type="button"><span class="lt-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 1.5M5 4l3 2M19 4l-3 2"/></svg></span><small id="listenSleepLabel">定时</small></button>
+        <button id="listenSleepBtn" class="listen-side-btn" type="button"><span class="lt-ico" aria-hidden="true"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 1.5M5 4l3 2M19 4l-3 2"/></svg></span><small id="listenSleepLabel">定时</small></button>
       </div>
 
       <div class="listen-bottom-cards">

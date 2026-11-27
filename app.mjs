@@ -1,9 +1,9 @@
-import { DEFAULT_SETTINGS, SAMPLE, decodeTxt, indexText, sectionAt, progressAt, isLowSurrogate } from './reader-core.mjs';
-import { listBooks, readText, saveBook, addBook, deleteBook } from './storage.mjs';
+import { DEFAULT_SETTINGS, SAMPLE, decodeTxt, indexText, sectionAt, progressAt, isLowSurrogate } from './reader-core.mjs?v=14';
+import { listBooks, readText, saveBook, addBook, deleteBook } from './storage.mjs?v=14';
 import {
   TtsController, EDGE_VOICES, SLEEP_OPTIONS,
   testTtsEndpoint, resolveApiEndpoint, loadLastListened, saveLastListened,
-} from './tts.mjs';
+} from './tts.mjs?v=14';
 
 const $ = id => document.getElementById(id);
 const viewport = $('viewport');
