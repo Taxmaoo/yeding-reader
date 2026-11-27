@@ -240,6 +240,7 @@ function bookActions(book) {
         event.currentTarget.disabled = true;
         try {
           await deleteBook(book.id);
+          if (tts.active && tts.bookId === book.id) tts.stop();
           books = books.filter(item => item.id !== book.id);
           if (loadLastListened()?.bookId === book.id) saveLastListened(null);
           renderShelf();
@@ -318,7 +319,9 @@ async function openBook(book, supplied) {
     document.body.classList.add('reading');
     $('bookLabel').textContent = $('toolbarTitle').textContent = book.title;
     applySettings();
-    jumpTo(book.position, { keepFinished: book.finished });
+    jumpTo(book.position, { keepFinished: book.finished, fromTts: true });
+    syncTtsHighlight();
+    syncOrbVisibility();
     viewport.focus({ preventScroll: true });
   } catch {
     if (active) closeReader();
@@ -330,7 +333,10 @@ async function openBook(book, supplied) {
 
 function closeReader() {
   if (!active) return;
-  tts.stop();
+  if (tts.active) {
+    const chunk = tts.getCurrentChunk();
+    if (chunk) persistListeningProgress(chunk, tts.getCurrentAudioTime());
+  }
   if (active.book.settings.mode === 'scroll' && scrollTimer) updateScrollPosition();
   clearTimeout(scrollTimer);
   scrollTimer = null;
@@ -345,6 +351,7 @@ function closeReader() {
   setThemeColor();
   passage.replaceChildren();
   renderShelf();
+  syncOrbVisibility();
   $('importBtn').focus({ preventScroll: true });
 }
 
@@ -533,7 +540,7 @@ function jumpTo(offset, { keepFinished = false, endOfSection = false, fromTts = 
   recordChapterProgress();
   updateProgress();
   store(book);
-  if (!fromTts && tts.active) tts.seekToOffset(book.position);
+  if (!fromTts && tts.active && active.book.id === tts.bookId) tts.seekToOffset(book.position);
 }
 
 function updateScrollPosition() {
@@ -593,6 +600,7 @@ function turn(direction) {
 function setMenu(open) {
   $('readerMenus').hidden = !open;
   $('menuToggle').setAttribute('aria-expanded', open);
+  syncOrbVisibility();
 }
 
 function toc() {
@@ -756,10 +764,12 @@ $('menuToggle').onclick = () => setMenu($('readerMenus').hidden);
 async function openBookAndListen(book) {
   const resumeOffset = book.ttsProgress?.offset ?? book.position ?? 0;
   const resumeTime = book.ttsProgress?.audioTime ?? 0;
-  await openBook(book);
+  if (active && active.book.id !== book.id) closeReader();
+  if (!active) await openBook(book);
   if (!active || active.book.id !== book.id) return;
-  ttsBarCollapsed = false;
+  ttsBarCollapsed = true;
   await tts.start(active.book.id, active.book.title, active.text, active.chapters, resumeOffset, resumeTime);
+  setListenView(true);
 }
 
 $('viewToggle').onclick = () => {
@@ -782,43 +792,36 @@ for (const btn of $('shelfFilter').querySelectorAll('button')) {
 }
 
 $('tocBtn').onclick = toc;
-function startOrToggleListen({ preferSaved = false } = {}) {
+function startOrToggleListen({ preferSaved = false, openView = true } = {}) {
   if (!active) return;
   setMenu(false);
-  if (tts.active) {
-    if (ttsBarCollapsed) {
-      ttsBarCollapsed = false;
-      $('ttsBar').hidden = false;
-    } else {
-      tts.togglePlay();
-    }
+  if (tts.active && tts.bookId === active.book.id) {
+    if (openView) setListenView(true);
+    else tts.togglePlay();
     return;
   }
-  ttsBarCollapsed = false;
+  ttsBarCollapsed = true;
   const saved = active.book.ttsProgress;
   const useSaved = Boolean(preferSaved && saved?.offset != null);
   const startAt = useSaved ? saved.offset : active.book.position;
   const resumeTime = useSaved ? (saved.audioTime || 0) : 0;
   tts.start(active.book.id, active.book.title, active.text, active.chapters, startAt, resumeTime);
+  if (openView) setListenView(true);
   if (!useSaved && saved?.offset != null && Math.abs(saved.offset - active.book.position) > 200) {
     toast('已从当前页首段开始听（点「定时」可回到上次听书点）');
   }
 }
 
-$('listenBtn').onclick = () => startOrToggleListen();
+$('listenBtn').onclick = () => startOrToggleListen({ openView: true });
 $('quickListenBtn').onclick = () => {
   if (!active) return;
   if (tts.active) {
-    ttsBarCollapsed = !ttsBarCollapsed;
-    $('ttsBar').hidden = ttsBarCollapsed;
-    requestAnimationFrame(() => {
-      if (active) jumpTo(active.book.position, { keepFinished: active.book.finished, fromTts: true });
-    });
+    setListenView(true);
     return;
   }
   const hasSaved = active.book.ttsProgress?.offset != null;
   const closeToSaved = hasSaved && Math.abs(active.book.ttsProgress.offset - active.book.position) <= 200;
-  startOrToggleListen({ preferSaved: closeToSaved });
+  startOrToggleListen({ preferSaved: closeToSaved, openView: true });
 };
 $('bookmarksBtn').onclick = bookmarks;
 $('markBtn').onclick = addMark;
@@ -826,11 +829,101 @@ $('settingsBtn').onclick = settings;
 
 const RATE_STEPS = [1.0, 1.25, 1.5, 1.75, 2.0, 0.85];
 let highlightedChunk = null;
-let ttsBarCollapsed = false;
+let ttsBarCollapsed = true;
+let listenViewOpen = false;
+let lastTtsState = null;
+
+function findListeningBook() {
+  if (!tts.bookId) return null;
+  if (active?.book.id === tts.bookId) return active.book;
+  return books.find(b => b.id === tts.bookId) || null;
+}
+
+function getBookTone(bookId) {
+  const idx = books.findIndex(b => b.id === bookId);
+  return String(idx >= 0 ? idx % 6 : 0);
+}
+
+// 悬浮小圆圈显示规则：
+// - 未听书或正在全屏「听书页面」时隐藏；
+// - 在「书架页」时始终悬浮显示；
+// - 在「阅读页」时平时隐藏不挡正文，点击阅读页呼出菜单时立即浮现！
+function syncOrbVisibility() {
+  const orb = $('ttsOrb');
+  if (!orb) return;
+  if (!tts.active || listenViewOpen) {
+    orb.hidden = true;
+    return;
+  }
+  const inReader = Boolean(active && !$('reader').hidden);
+  if (!inReader) {
+    orb.classList.remove('in-reader-menu');
+    orb.hidden = false;
+  } else {
+    const menuOpen = !$('readerMenus').hidden;
+    orb.classList.toggle('in-reader-menu', menuOpen);
+    orb.hidden = !menuOpen;
+  }
+}
+
+function setListenView(open) {
+  listenViewOpen = Boolean(open && tts.active);
+  $('listenView').hidden = !listenViewOpen;
+  if (listenViewOpen) {
+    setMenu(false);
+    renderListenView(lastTtsState);
+  }
+  syncOrbVisibility();
+}
+
+function renderListenView(state) {
+  if (!listenViewOpen || !tts.active) return;
+  const book = findListeningBook();
+  const title = book?.title || tts.bookTitle || '页灯听书';
+  const tone = getBookTone(tts.bookId);
+  const cover = $('listenCover');
+  cover.textContent = Array.from(title)[0] || '书';
+  cover.dataset.tone = tone;
+  $('listenBookTitle').textContent = title;
+
+  const chunk = state?.chunk || tts.getCurrentChunk();
+  $('listenChapter').textContent = chunk?.chapterTitle || title;
+
+  const totalLen = Math.max(1, book?.length || 1);
+  const pct = chunk ? progressAt(chunk.start, totalLen, Boolean(book?.finished)) : 0;
+  $('listenProgressText').textContent = `${pct}%`;
+  $('listenProgressFill').style.width = `${pct}%`;
+  $('listenVoiceTag').textContent = state?.voiceName || '多角色';
+
+  const loading = Boolean(state?.loading);
+  const playing = Boolean(state?.playing);
+  $('listenPlayBtn').textContent = loading ? '…' : playing ? '⏸' : '▶';
+  $('listenPrevBtn').disabled = tts.chunkIndex <= 0;
+  $('listenNextBtn').disabled = tts.chunkIndex >= tts.chunks.length - 1;
+  $('listenRateBtn').textContent = `${Number(state?.rate ?? tts.settings.rate).toFixed(2).replace(/\.?0+$/, '')}x`;
+  $('listenSleepBtn').textContent = state?.sleepLabel || tts.getSleepLabel();
+  $('listenSleepBtn').dataset.active = String((state?.sleepMode ?? tts.sleepMode) !== 'off');
+
+  // 渲染当前朗读段及前后语境（点击任意段可直接跳转朗读）
+  const lyrics = $('listenLyrics');
+  const curIdx = tts.chunkIndex;
+  const start = Math.max(0, curIdx - 1);
+  const end = Math.min(tts.chunks.length - 1, curIdx + 2);
+  const nodes = [];
+  for (let i = start; i <= end; i++) {
+    const item = tts.chunks[i];
+    if (!item) continue;
+    const line = button(item.text.replace(/\n+/g, ' '), () => {
+      if (i !== tts.chunkIndex) tts.stepChunk(i - tts.chunkIndex);
+    }, `listen-line${i === curIdx ? ' is-current' : ''}`);
+    nodes.push(line);
+  }
+  lyrics.replaceChildren(...nodes);
+}
 
 function persistListeningProgress(chunk, audioTime = 0) {
-  if (!active || !chunk) return;
-  const { book } = active;
+  const book = findListeningBook();
+  if (!book || !chunk) return;
   const percent = progressAt(chunk.start, book.length, book.finished);
   const record = {
     bookId: book.id,
@@ -852,10 +945,11 @@ function persistListeningProgress(chunk, audioTime = 0) {
   };
   saveLastListened(record);
   store(book);
+  if (!active) renderResumeCard();
 }
 
 function followTtsChunk(chunk) {
-  if (!active || !chunk) return;
+  if (!active || active.book.id !== tts.bookId || !chunk) return;
   const { book, sections } = active;
   const targetSection = sectionAt(sections, chunk.start);
   if (targetSection !== active.sectionIndex) {
@@ -891,55 +985,49 @@ function followTtsChunk(chunk) {
 function syncTtsHighlight(chunk = highlightedChunk) {
   highlightedChunk = chunk;
   if (!active) return;
+  const sameBook = tts.active && active.book.id === tts.bookId;
   for (const span of active.spans) {
-    const hit = Boolean(chunk && span.end > chunk.start && span.start < chunk.end);
+    const hit = Boolean(sameBook && chunk && span.end > chunk.start && span.start < chunk.end);
     span.node.classList.toggle('tts-reading', hit);
   }
 }
 
 function renderTtsBar(state) {
+  lastTtsState = state;
   const bar = $('ttsBar');
   const quickBtn = $('quickListenBtn');
-  const wasHidden = bar.hidden;
+  bar.hidden = true; // 改用悬浮小圆圈 + 沉浸听书页，阅读页不再被底栏挤占空间
+
   if (!state.active) {
-    ttsBarCollapsed = false;
-    bar.hidden = true;
+    listenViewOpen = false;
+    $('listenView').hidden = true;
     quickBtn.textContent = '🎧 听书';
     quickBtn.dataset.listening = 'false';
+    syncOrbVisibility();
     return;
   }
 
-  bar.hidden = ttsBarCollapsed;
   quickBtn.dataset.listening = 'true';
   quickBtn.textContent = state.loading ? '🎧 缓冲…' : state.playing ? '🎧 听书中' : '🎧 已暂停';
 
-  const snippet = state.chunk?.text?.replace(/\s+/g, ' ').slice(0, 22) || '';
-  const chapter = state.chunk?.chapterTitle || '';
-  const prefix = state.loading ? '合成中… ' : state.playing ? `${state.voiceName || '听书中'} · ` : '已暂停 · ';
-  $('ttsStatus').textContent = `${prefix}${chapter ? `${chapter} · ` : ''}${snippet}`;
+  // 更新悬浮小圆圈外观与旋转状态
+  const book = findListeningBook();
+  const title = book?.title || tts.bookTitle || '听';
+  $('ttsOrb').dataset.playing = String(Boolean(state.playing && !state.loading));
+  $('ttsOrbDisc').dataset.tone = getBookTone(tts.bookId);
+  $('ttsOrbChar').textContent = Array.from(title)[0] || '听';
+  syncOrbVisibility();
 
-  $('ttsPlay').textContent = state.loading ? '缓冲…' : state.playing ? '暂停' : '播放';
-  $('ttsRate').textContent = `${Number(state.rate).toFixed(2).replace(/\.?0+$/, '')}x`;
-  $('ttsSleep').textContent = state.sleepLabel;
-  $('ttsSleep').dataset.active = String(state.sleepMode !== 'off');
-  $('ttsPrev').disabled = state.chunkIndex <= 0;
-  $('ttsNext').disabled = state.chunkIndex >= state.totalChunks - 1;
-
-  if (wasHidden && !bar.hidden && active) {
-    requestAnimationFrame(() => {
-      if (active) jumpTo(active.book.position, { keepFinished: active.book.finished, fromTts: true });
-    });
-  }
+  if (listenViewOpen) renderListenView(state);
 }
 
 const tts = new TtsController({
   onChunkChange(chunk) {
-    if (!active) return;
     persistListeningProgress(chunk, 0);
     followTtsChunk(chunk);
+    if (listenViewOpen) renderListenView(lastTtsState);
   },
   onPauseProgress(chunk, audioTime) {
-    if (!active) return;
     persistListeningProgress(chunk, audioTime);
   },
   onHighlight(chunk) {
@@ -949,7 +1037,8 @@ const tts = new TtsController({
     renderTtsBar(state);
   },
   onBookEnd() {
-    if (active) finishBook();
+    if (active && active.book.id === tts.bookId) finishBook();
+    else toast('已听完全书。');
   },
   onToast(message) {
     toast(message);
@@ -958,6 +1047,44 @@ const tts = new TtsController({
     if (!dialog.open) openTtsSettings();
   },
 });
+
+$('ttsOrb').onclick = () => setListenView(true);
+$('listenMinBtn').onclick = () => setListenView(false);
+$('listenExitBtn').onclick = () => {
+  tts.stop();
+  setListenView(false);
+  toast('已退出听书。');
+};
+$('listenToReaderBtn').onclick = async () => {
+  const targetBook = findListeningBook();
+  const curChunk = tts.getCurrentChunk();
+  setListenView(false);
+  if (!targetBook) return;
+  if (active && active.book.id !== targetBook.id) closeReader();
+  if (!active) await openBook(targetBook);
+  if (active && curChunk) {
+    jumpTo(curChunk.start, { fromTts: true });
+    syncTtsHighlight(curChunk);
+  }
+};
+$('listenPlayBtn').onclick = () => tts.togglePlay();
+$('listenPrevBtn').onclick = () => tts.stepChunk(-1);
+$('listenNextBtn').onclick = () => tts.stepChunk(1);
+$('listenVoiceBtn').onclick = () => openTtsSettings();
+$('listenRateBtn').onclick = () => {
+  const idx = RATE_STEPS.indexOf(Number(tts.settings.rate));
+  const next = RATE_STEPS[(idx + 1) % RATE_STEPS.length];
+  tts.updateSettings({ rate: next });
+  toast(`语速已切至 ${next}x`);
+};
+$('listenSleepBtn').onclick = () => openSleepDialog();
+$('listenTocBtn').onclick = async () => {
+  const targetBook = findListeningBook();
+  if (!targetBook) return;
+  if (active && active.book.id !== targetBook.id) closeReader();
+  if (!active) await openBook(targetBook);
+  if (active) toc();
+};
 
 function openSleepDialog() {
   const wrap = element('div', null, 'settings-row');

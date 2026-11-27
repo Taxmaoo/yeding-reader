@@ -831,6 +831,271 @@ body[data-theme="night"] .voice-card[aria-pressed="true"] strong { color: var(--
 }
 .tts-advanced summary::before { content: "▸ "; }
 .tts-advanced[open] summary::before { content: "▾ "; }
+
+/* 番茄风悬浮听书小圆圈 */
+@keyframes ttsSpin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.tts-orb {
+  position: fixed;
+  right: max(18px, calc(var(--safe-right) + 14px));
+  bottom: calc(26px + var(--safe-bottom));
+  z-index: 4;
+  width: 56px;
+  height: 56px;
+  padding: 3px;
+  border: 2px solid #fa6432;
+  border-radius: 50%;
+  background: var(--surface);
+  box-shadow: 0 6px 20px rgb(36 21 11 / .26);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform .18s ease, bottom .2s ease;
+}
+.tts-orb.in-reader-menu {
+  bottom: calc(144px + var(--safe-bottom));
+}
+.tts-orb:active { transform: scale(.94); }
+.tts-orb-disc {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fffaf3;
+  font: 700 18px/1 var(--serif);
+  box-shadow: inset 0 0 0 2px rgb(255 255 255 / .28);
+  animation: ttsSpin 12s linear infinite;
+  animation-play-state: paused;
+}
+.tts-orb[data-playing="true"] .tts-orb-disc {
+  animation-play-state: running;
+}
+.tts-orb-badge {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #fa6432;
+  color: #fff;
+  font-size: 11px;
+  line-height: 22px;
+  text-align: center;
+  box-shadow: 0 2px 6px rgb(0 0 0 / .25);
+}
+
+/* 番茄风全屏沉浸听书页面 */
+.listen-view {
+  position: fixed;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  padding: calc(var(--safe-top) + 6px) max(20px, var(--safe-right)) calc(var(--safe-bottom) + 18px) max(20px, var(--safe-left));
+  background: linear-gradient(180deg, #3c3a25 0%, #2a281a 55%, #1e1d15 100%);
+  color: #f3eee0;
+}
+.listen-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 44px;
+  max-width: 680px;
+  width: 100%;
+  margin-inline: auto;
+}
+.listen-header-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #f4eedf;
+  letter-spacing: .04em;
+}
+.listen-header-right { display: flex; align-items: center; gap: 8px; }
+.listen-icon-btn {
+  min-width: 40px;
+  min-height: 40px;
+  border: 0;
+  border-radius: 999px;
+  background: rgb(255 255 255 / .1);
+  color: #f4eedf;
+  font-size: 22px;
+  line-height: 1;
+}
+.listen-pill-btn {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid rgb(255 255 255 / .22);
+  border-radius: 999px;
+  background: rgb(255 255 255 / .08);
+  color: #f4eedf;
+  font-size: 12px;
+}
+.listen-pill-btn.danger {
+  border-color: rgb(250 100 50 / .45);
+  color: #ffb399;
+}
+.listen-book-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  max-width: 680px;
+  width: 100%;
+  margin: 14px auto 12px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgb(255 255 255 / .07);
+}
+.listen-cover {
+  flex: 0 0 auto;
+  width: 46px;
+  height: 62px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px 8px 8px 4px;
+  color: #fffaf3;
+  font: 700 20px/1 var(--serif);
+  box-shadow: inset 5px 0 rgb(0 0 0 / .24), 0 4px 10px rgb(0 0 0 / .3);
+}
+.listen-book-meta {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+.listen-book-meta strong {
+  font-size: 16px;
+  color: #fff8e8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.listen-book-meta span {
+  font-size: 13px;
+  color: rgb(243 238 224 / .65);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.listen-lyrics {
+  flex: 1 1 0;
+  min-height: 0;
+  max-width: 680px;
+  width: 100%;
+  margin: 8px auto 16px;
+  overflow-y: auto;
+  scrollbar-width: none;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 14px;
+  padding: 10px 4px;
+}
+.listen-lyrics::-webkit-scrollbar { display: none; }
+.listen-line {
+  margin: 0;
+  padding: 10px 14px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: rgb(243 238 224 / .48);
+  font-family: var(--serif);
+  font-size: 17px;
+  line-height: 1.75;
+  text-align: start;
+  transition: background-color .2s ease, color .2s ease;
+}
+.listen-line.is-current {
+  background: rgb(255 255 255 / .12);
+  color: #fff9ec;
+  font-size: 19px;
+  font-weight: 500;
+}
+.listen-panel {
+  flex: 0 0 auto;
+  max-width: 680px;
+  width: 100%;
+  margin-inline: auto;
+  display: grid;
+  gap: 16px;
+}
+.listen-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: rgb(243 238 224 / .72);
+  font-variant-numeric: tabular-nums;
+}
+.listen-progress-bar {
+  flex: 1;
+  height: 4px;
+  border-radius: 999px;
+  background: rgb(255 255 255 / .16);
+  overflow: hidden;
+}
+.listen-progress-bar > span {
+  display: block;
+  height: 100%;
+  background: #fa6432;
+  border-radius: 999px;
+  transition: width .25s ease;
+}
+.listen-main-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 24px;
+}
+.listen-step-btn {
+  min-width: 82px;
+  min-height: 44px;
+  padding: 0 14px;
+  border: 1px solid rgb(255 255 255 / .2);
+  border-radius: 999px;
+  background: rgb(255 255 255 / .08);
+  color: #f4eedf;
+  font-size: 14px;
+}
+.listen-play-btn {
+  width: 64px;
+  height: 64px;
+  border: 0;
+  border-radius: 50%;
+  background: #fa6432;
+  color: #fff;
+  font-size: 24px;
+  font-weight: 700;
+  box-shadow: 0 6px 20px rgb(250 100 50 / .45);
+}
+.listen-sub-controls {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+.listen-sub-controls button {
+  min-height: 40px;
+  padding: 0 6px;
+  border: 1px solid rgb(255 255 255 / .16);
+  border-radius: 10px;
+  background: rgb(255 255 255 / .07);
+  color: #f4eedf;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.listen-sub-controls button[data-active="true"] {
+  border-color: #fa6432;
+  background: rgb(250 100 50 / .24);
+  color: #ffd3c4;
+}
 .tts-icon-btn {
   min-width: 34px;
   min-height: 34px;

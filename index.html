@@ -95,6 +95,52 @@
     </div>
   </section>
 
+  <!-- 番茄风沉浸听书页 -->
+  <section id="listenView" class="listen-view" aria-label="智能朗读页面" hidden>
+    <header class="listen-header">
+      <button id="listenMinBtn" class="listen-icon-btn" type="button" aria-label="收起为悬浮球">⌄</button>
+      <span class="listen-header-title">智能朗读</span>
+      <div class="listen-header-right">
+        <button id="listenToReaderBtn" class="listen-pill-btn" type="button">看正文</button>
+        <button id="listenExitBtn" class="listen-pill-btn danger" type="button">退出</button>
+      </div>
+    </header>
+    <div class="listen-book-card">
+      <div id="listenCover" class="listen-cover" data-tone="0">书</div>
+      <div class="listen-book-meta">
+        <strong id="listenChapter">正在准备…</strong>
+        <span id="listenBookTitle"></span>
+      </div>
+    </div>
+    <div id="listenLyrics" class="listen-lyrics" aria-live="polite"></div>
+    <div class="listen-panel">
+      <div class="listen-progress-row">
+        <span id="listenProgressText">0%</span>
+        <div class="listen-progress-bar"><span id="listenProgressFill"></span></div>
+        <span id="listenVoiceTag">多角色</span>
+      </div>
+      <div class="listen-main-controls">
+        <button id="listenPrevBtn" class="listen-step-btn" type="button" aria-label="上一段">‹ 上段</button>
+        <button id="listenPlayBtn" class="listen-play-btn" type="button" aria-label="播放或暂停">⏸</button>
+        <button id="listenNextBtn" class="listen-step-btn" type="button" aria-label="下一段">下段 ›</button>
+      </div>
+      <div class="listen-sub-controls">
+        <button id="listenTocBtn" type="button">目录</button>
+        <button id="listenVoiceBtn" type="button">音色</button>
+        <button id="listenRateBtn" type="button">1.0x</button>
+        <button id="listenSleepBtn" type="button">定时</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- 番茄风悬浮听书小圆圈 -->
+  <button id="ttsOrb" class="tts-orb" type="button" aria-label="打开听书页面" hidden>
+    <span id="ttsOrbDisc" class="tts-orb-disc" data-tone="0">
+      <span id="ttsOrbChar" class="tts-orb-char">听</span>
+    </span>
+    <span class="tts-orb-badge" aria-hidden="true">🎧</span>
+  </button>
+
   <dialog id="dialog" aria-labelledby="dialogTitle">
     <header class="dialog-header"><h2 id="dialogTitle"></h2><button id="closeDialog" type="button" aria-label="关闭">×</button></header>
     <div id="dialogBody"></div>
