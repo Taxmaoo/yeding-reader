@@ -1,18 +1,18 @@
-import { DEFAULT_SETTINGS, SAMPLE, decodeTxt, indexText, sectionAt, progressAt, isLowSurrogate } from './reader-core.mjs?v=19';
+import { DEFAULT_SETTINGS, SAMPLE, decodeTxt, indexText, sectionAt, progressAt, isLowSurrogate } from './reader-core.mjs?v=20';
 import {
   listBooks, readText, saveBook, addBook, putBook, deleteBook,
   saveMetaMirror, requestPersistentStorage,
-} from './storage.mjs?v=19';
+} from './storage.mjs?v=20';
 import {
   TtsController, EDGE_VOICES, SLEEP_OPTIONS,
   testTtsEndpoint, resolveApiEndpoint, loadLastListened, saveLastListened,
-} from './tts.mjs?v=19';
+} from './tts.mjs?v=20';
 import {
   generateSyncKey, validateSyncKey, loadSyncKey, saveSyncKey, loadLastSyncTime,
   markLocalDeleted, clearLocalDeleted, checkCloudStatus, pushBookMeta,
   uploadBookFull, syncAllBooks, scheduleMetaSync, flushMetaSync,
   exportLibraryBackup, importLibraryBackup,
-} from './sync.mjs?v=19';
+} from './sync.mjs?v=20';
 
 const $ = id => document.getElementById(id);
 const viewport = $('viewport');
@@ -104,7 +104,8 @@ function renderResumeCard() {
     element('strong', targetBook.title, 'resume-title'),
     element('span', `${chapterText}听到 ${percent}%`, 'resume-meta'),
   );
-  const btn = button('▶ 继续听', () => openBookAndListen(targetBook), 'resume-btn');
+  const btn = button(null, () => openBookAndListen(targetBook), 'resume-btn');
+  btn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" style="vertical-align:-1px;margin-right:4px"><path d="M7.5 4.8a1.5 1.5 0 0 1 2.25-1.3l11.2 6.5a1.5 1.5 0 0 1 0 2.6l-11.2 6.5a1.5 1.5 0 0 1-2.25-1.3V4.8z"/></svg>继续听';
   card.replaceChildren(cover, info, btn);
   card.hidden = false;
 }
@@ -1174,6 +1175,32 @@ function setListenView(open) {
   syncOrbVisibility();
 }
 
+const SVG_LISTEN_PLAY = '<svg width="34" height="34" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7.5 4.8a1.5 1.5 0 0 1 2.25-1.3l11.2 6.5a1.5 1.5 0 0 1 0 2.6l-11.2 6.5a1.5 1.5 0 0 1-2.25-1.3V4.8z"/></svg>';
+const SVG_LISTEN_PAUSE = '<svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="5.5" y="4.5" width="4.4" height="15" rx="2"/><rect x="14.1" y="4.5" width="4.4" height="15" rx="2"/></svg>';
+const SVG_LISTEN_LOAD = '<svg class="tts-spin-ico" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 3a9 9 0 1 1-6.36 2.64"/></svg>';
+const SVG_CAPSULE_PLAY = '<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5.2a1.4 1.4 0 0 1 2.1-1.2l9.6 5.6a1.4 1.4 0 0 1 0 2.4l-9.6 5.6A1.4 1.4 0 0 1 8 16.4V5.2z"/></svg>';
+const SVG_CAPSULE_PAUSE = '<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.6"/><rect x="14" y="5" width="4" height="14" rx="1.6"/></svg>';
+const SVG_CAPSULE_LOAD = '<svg class="tts-spin-ico" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 3a9 9 0 1 1-6.36 2.64"/></svg>';
+
+function stepListenChapter(delta) {
+  if (!tts.active || !tts.chunks.length) return;
+  const cur = tts.getCurrentChunk();
+  if (!cur) return;
+  const lastCh = tts.chunks.at(-1)?.chapterIndex ?? 0;
+  if (lastCh === 0) {
+    tts.stepChunk(delta);
+    return;
+  }
+  const targetCh = cur.chapterIndex + delta;
+  const hit = tts.chunks.find(c => c.chapterIndex === targetCh);
+  if (hit) {
+    tts.stepChunk(hit.index - tts.chunkIndex);
+    toast(delta > 0 ? `下一章：${hit.chapterTitle}` : `上一章：${hit.chapterTitle}`);
+  } else {
+    toast(delta > 0 ? '已经是最后一章了' : '已经是第一章了');
+  }
+}
+
 function renderListenView(state) {
   if (!listenViewOpen || !tts.active) return;
   const book = findListeningBook();
@@ -1196,9 +1223,11 @@ function renderListenView(state) {
 
   const loading = Boolean(state?.loading);
   const playing = Boolean(state?.playing);
-  $('listenPlayBtn').textContent = loading ? '…' : playing ? '⏸' : '▶';
-  $('listenPrevBtn').disabled = tts.chunkIndex <= 0;
-  $('listenNextBtn').disabled = tts.chunkIndex >= tts.chunks.length - 1;
+  $('listenPlayBtn').innerHTML = loading ? SVG_LISTEN_LOAD : playing ? SVG_LISTEN_PAUSE : SVG_LISTEN_PLAY;
+  const curCh = chunk?.chapterIndex ?? 0;
+  const lastCh = tts.chunks.at(-1)?.chapterIndex ?? 0;
+  $('listenPrevBtn').disabled = lastCh > 0 ? curCh <= 0 : tts.chunkIndex <= 0;
+  $('listenNextBtn').disabled = lastCh > 0 ? curCh >= lastCh : tts.chunkIndex >= tts.chunks.length - 1;
   $('listenRateLabel').textContent = `${Number(state?.rate ?? tts.settings.rate).toFixed(2).replace(/\.?0+$/, '')}x`;
   $('listenSleepLabel').textContent = state?.sleepLabel || tts.getSleepLabel();
   $('listenSleepBtn').dataset.active = String((state?.sleepMode ?? tts.sleepMode) !== 'off');
@@ -1321,7 +1350,7 @@ function renderTtsBar(state) {
   $('ttsCapsule').dataset.playing = String(playing);
   $('capsuleDisc').dataset.tone = getBookTone(tts.bookId);
   $('capsuleChar').textContent = Array.from(title)[0] || '书';
-  $('capsulePlayBtn').textContent = state.loading ? '…' : state.playing ? '⏸' : '▶';
+  $('capsulePlayBtn').innerHTML = state.loading ? SVG_CAPSULE_LOAD : state.playing ? SVG_CAPSULE_PAUSE : SVG_CAPSULE_PLAY;
   syncOrbVisibility();
 
   if (listenViewOpen) renderListenView(state);
@@ -1394,8 +1423,8 @@ $('listenTocBtn').onclick = openListenToc;
 $('listenToReaderBtn').onclick = jumpListenToReader;
 $('listenReadCard').onclick = jumpListenToReader;
 $('listenPlayBtn').onclick = () => tts.togglePlay();
-$('listenPrevBtn').onclick = () => tts.stepChunk(-1);
-$('listenNextBtn').onclick = () => tts.stepChunk(1);
+$('listenPrevBtn').onclick = () => stepListenChapter(-1);
+$('listenNextBtn').onclick = () => stepListenChapter(1);
 $('listenBackSec').onclick = () => tts.stepChunk(-1);
 $('listenVoiceCardHead').onclick = openTtsSettings;
 $('listenVoiceMoreBtn').onclick = openTtsSettings;

@@ -10,8 +10,8 @@
   <link rel="manifest" href="./manifest.webmanifest">
   <link rel="icon" href="./icon-192.png">
   <link rel="apple-touch-icon" href="./apple-touch-icon.png">
-  <link rel="stylesheet" href="./styles.css?v=19">
-  <script type="module" src="./app.mjs?v=19"></script>
+  <link rel="stylesheet" href="./styles.css?v=20">
+  <script type="module" src="./app.mjs?v=20"></script>
 </head>
 <body>
   <div id="library" class="library">
@@ -103,7 +103,7 @@
     <button id="capsuleOpenBtn" class="capsule-cover-btn" type="button" aria-label="进入听书页面">
       <span id="capsuleDisc" class="capsule-disc" data-tone="0"><span id="capsuleChar">书</span></span>
     </button>
-    <button id="capsulePlayBtn" class="capsule-icon-btn capsule-play" type="button" aria-label="播放或暂停">⏸</button>
+    <button id="capsulePlayBtn" class="capsule-icon-btn capsule-play" type="button" aria-label="播放或暂停"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.6"/><rect x="14" y="5" width="4" height="14" rx="1.6"/></svg></button>
     <button id="capsuleVoiceBtn" class="capsule-icon-btn" type="button" aria-label="音色设置">⇄</button>
     <button id="capsuleCloseBtn" class="capsule-icon-btn" type="button" aria-label="退出听书">×</button>
   </div>
@@ -143,9 +143,9 @@
 
       <div class="listen-transport">
         <button id="listenTocBtn" class="listen-side-btn" type="button"><span class="lt-ico" aria-hidden="true"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h16M4 17h11"/></svg></span><small>目录</small></button>
-        <button id="listenPrevBtn" class="listen-skip-btn" type="button" aria-label="上一段">⏮</button>
-        <button id="listenPlayBtn" class="listen-play-btn" type="button" aria-label="播放或暂停">⏸</button>
-        <button id="listenNextBtn" class="listen-skip-btn" type="button" aria-label="下一段">⏭</button>
+        <button id="listenPrevBtn" class="listen-skip-btn" type="button" aria-label="上一章"><svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="4.5" y="5.5" width="2.4" height="13" rx="1.2"/><path d="M18.2 6.1a1.2 1.2 0 0 1 1.8 1.03v9.74a1.2 1.2 0 0 1-1.8 1.03L9.3 13.03a1.2 1.2 0 0 1 0-2.06l8.9-4.87z"/></svg></button>
+        <button id="listenPlayBtn" class="listen-play-btn" type="button" aria-label="播放或暂停"><svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="5.5" y="4.5" width="4.4" height="15" rx="2"/><rect x="14.1" y="4.5" width="4.4" height="15" rx="2"/></svg></button>
+        <button id="listenNextBtn" class="listen-skip-btn" type="button" aria-label="下一章"><svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M5.8 6.1a1.2 1.2 0 0 0-1.8 1.03v9.74a1.2 1.2 0 0 0 1.8 1.03l8.9-4.87a1.2 1.2 0 0 0 0-2.06L5.8 6.1z"/><rect x="17.1" y="5.5" width="2.4" height="13" rx="1.2"/></svg></button>
         <button id="listenSleepBtn" class="listen-side-btn" type="button"><span class="lt-ico" aria-hidden="true"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 1.5M5 4l3 2M19 4l-3 2"/></svg></span><small id="listenSleepLabel">定时</small></button>
       </div>
 

@@ -1103,27 +1103,24 @@ body[data-theme="night"] .passage .tts-reading {
   cursor: pointer;
 }
 .reader.tts-pick-mode .passage p::before {
-  content: "▶";
+  content: "";
   position: absolute;
   left: 3px;
   top: 7px;
   width: 22px;
   height: 22px;
   border-radius: 50%;
-  border: 1px solid rgb(92 73 48 / .22);
-  background: rgb(92 73 48 / .07);
-  color: rgb(92 73 48 / .62);
-  font: 600 9px/20px system-ui, sans-serif;
-  text-indent: 2px;
-  text-align: center;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  border: 1px solid rgb(92 73 48 / .24);
+  background-color: rgb(92 73 48 / .07);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%235c4930' fill-opacity='0.65'%3E%3Cpath d='M9 6.8a1.2 1.2 0 0 1 1.8-1.04l7.8 4.6a1.2 1.2 0 0 1 0 2.08l-7.8 4.6A1.2 1.2 0 0 1 9 16V6.8z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 13px 13px;
 }
 body[data-theme="night"] .reader.tts-pick-mode .passage p::before {
-  border-color: rgb(255 255 255 / .22);
-  background: rgb(255 255 255 / .1);
-  color: rgb(255 255 255 / .75);
+  border-color: rgb(255 255 255 / .24);
+  background-color: rgb(255 255 255 / .1);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23ffffff' fill-opacity='0.8'%3E%3Cpath d='M9 6.8a1.2 1.2 0 0 1 1.8-1.04l7.8 4.6a1.2 1.2 0 0 1 0 2.08l-7.8 4.6A1.2 1.2 0 0 1 9 16V6.8z'/%3E%3C/svg%3E");
 }
 
 /* 图 2：未听书时点击阅读页右下角浮现的深棕「听」圆形按钮 */
@@ -1449,19 +1446,33 @@ body[data-theme="night"] .listen-float-btn {
 .listen-skip-btn {
   min-width: 48px;
   min-height: 48px;
+  padding: 0;
   border: 0;
   background: transparent;
   color: #ffffff;
-  font-size: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity .15s ease, transform .12s ease;
 }
+.listen-skip-btn:active { transform: scale(.9); }
+.listen-skip-btn:disabled { opacity: .35; }
 .listen-play-btn {
-  width: 56px;
-  height: 56px;
+  width: 58px;
+  height: 58px;
+  padding: 0;
   border: 0;
+  border-radius: 50%;
   background: transparent;
   color: #ffffff;
-  font-size: 36px;
-  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform .12s ease;
+}
+.listen-play-btn:active { transform: scale(.9); }
+.tts-spin-ico {
+  animation: ttsSpin .9s linear infinite;
 }
 
 /* 图 4 底部磨砂双卡（音色设置 + 边听边读） */
