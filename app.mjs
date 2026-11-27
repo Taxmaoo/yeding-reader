@@ -1,18 +1,18 @@
-import { DEFAULT_SETTINGS, SAMPLE, decodeTxt, indexText, sectionAt, progressAt, isLowSurrogate } from './reader-core.mjs?v=18';
+import { DEFAULT_SETTINGS, SAMPLE, decodeTxt, indexText, sectionAt, progressAt, isLowSurrogate } from './reader-core.mjs?v=19';
 import {
   listBooks, readText, saveBook, addBook, putBook, deleteBook,
   saveMetaMirror, requestPersistentStorage,
-} from './storage.mjs?v=18';
+} from './storage.mjs?v=19';
 import {
   TtsController, EDGE_VOICES, SLEEP_OPTIONS,
   testTtsEndpoint, resolveApiEndpoint, loadLastListened, saveLastListened,
-} from './tts.mjs?v=18';
+} from './tts.mjs?v=19';
 import {
   generateSyncKey, validateSyncKey, loadSyncKey, saveSyncKey, loadLastSyncTime,
   markLocalDeleted, clearLocalDeleted, checkCloudStatus, pushBookMeta,
   uploadBookFull, syncAllBooks, scheduleMetaSync, flushMetaSync,
   exportLibraryBackup, importLibraryBackup,
-} from './sync.mjs?v=18';
+} from './sync.mjs?v=19';
 
 const $ = id => document.getElementById(id);
 const viewport = $('viewport');
@@ -49,6 +49,7 @@ function toast(message) {
 }
 
 function store(book) {
+  if (book) book.lastRead = Date.now();
   saveMetaMirror(books);
   scheduleMetaSync(book);
   return saveBook(book).catch(() => toast('保存阅读进度失败。'));
@@ -73,18 +74,23 @@ function formatTimeAgo(ts) {
 function renderResumeCard() {
   const card = $('resumeListenCard');
   const saved = loadLastListened();
-  let targetBook = saved ? books.find(b => b.id === saved.bookId) : null;
-  if (!targetBook) {
-    targetBook = books
-      .filter(b => b.ttsProgress?.offset != null)
-      .sort((a, b) => (b.ttsProgress.updatedAt || 0) - (a.ttsProgress.updatedAt || 0))[0] || null;
+  const latestCloudBook = books
+    .filter(b => b.ttsProgress?.offset != null)
+    .sort((a, b) => (b.ttsProgress.updatedAt || 0) - (a.ttsProgress.updatedAt || 0))[0] || null;
+  const savedBook = saved ? books.find(b => b.id === saved.bookId) : null;
+  // 始终以最新听书时间戳为准（确保云端同步下来的更新进度能立即接管续听卡片）
+  let targetBook = latestCloudBook;
+  if (savedBook && (!latestCloudBook || (saved.updatedAt || 0) > (latestCloudBook.ttsProgress?.updatedAt || 0))) {
+    targetBook = savedBook;
   }
   if (!targetBook) {
     card.hidden = true;
     card.replaceChildren();
     return;
   }
-  const prog = targetBook.ttsProgress || saved;
+  const prog = (targetBook.ttsProgress?.updatedAt || 0) >= (saved?.updatedAt || 0)
+    ? targetBook.ttsProgress
+    : (saved || targetBook.ttsProgress);
   const percent = prog?.percent ?? progressAt(prog?.offset ?? targetBook.position, targetBook.length, targetBook.finished);
   const tone = books.indexOf(targetBook) % 6;
 
