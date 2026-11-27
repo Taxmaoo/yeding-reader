@@ -26,6 +26,7 @@ let hooks = {
   upsertBook: null, readText: null, findBookByRemote: null, openBook: null, toast: null,
 };
 let busy = false;
+let activeRunCancel = null;
 
 const $ = id => document.getElementById(id);
 
@@ -110,6 +111,13 @@ function paceSelectElement() {
   }
   select.value = readSetting(PACE_KEY, 'normal');
   return select;
+}
+
+/** 如果上一次下载还在跑，先停掉并等它收尾，避免 busy 卡住新操作。 */
+async function ensureIdle() {
+  if (!busy) return;
+  activeRunCancel?.();
+  for (let i = 0; i < 24 && busy; i += 1) await sleep(150);
 }
 
 // ---------- 面板：搜索 ----------
@@ -398,6 +406,12 @@ async function runDownload({
   const cancel = button('停止', () => { cancelled = true; }, 'secondary dl-cancel');
   container.append(log, bar, actionRow(cancel));
 
+  // 关掉面板 = 停止这次下载（已取到的章照常保存），避免 busy 一直挂着
+  const dialogEl = $('dialog');
+  const requestStop = () => { cancelled = true; };
+  activeRunCancel = requestStop;
+  dialogEl.addEventListener('close', requestStop);
+
   const rows = [];
   let failedCount = 0;
   let delay = pace.delay;
@@ -437,31 +451,59 @@ async function runDownload({
       await sleep(Math.min(delay, 500));
     }
 
-    // ② 取新增章节
+    // ② 取新增章节：按 id 累积结果，只补失败的，任何一轮都不会覆盖已取到的章
+    let pageNo = 0;
+    let lastRotatePage = -99;
     for (let i = 0; i < chapters.length; i += BATCH) {
       if (cancelled) break;
       const slice = chapters.slice(i, i + BATCH);
-      let batch = null;
+      const got = new Map();
+      pageNo += 1;
+
       for (let attempt = 0; attempt < 3; attempt += 1) {
         if (cancelled) break;
-        try {
-          batch = await requestPage(slice, attempt > 0);
-        } catch {
-          batch = null;
-        }
-        if (!batch) { await sleep(700 + attempt * 500); continue; }
-        if (!batch.some(row => !row.ok)) break;
-        if (attempt === 0) await sleep(900);
-        else if (attempt === 1) {
+        const pending = slice.filter(chapter => {
+          const row = got.get(chapter.id);
+          return !row || !row.ok;
+        });
+        if (!pending.length) break;
+
+        // 只有连续两轮都拿不全、且距上次换设备足够久，才换身份，避免频繁注册新设备
+        const wantFresh = attempt >= 2 && pageNo - lastRotatePage >= 10;
+        if (wantFresh) {
+          lastRotatePage = pageNo;
           rotations += 1;
+        }
+
+        let page = [];
+        try {
+          page = await requestPage(pending, wantFresh);
+        } catch {
+          page = [];
+        }
+        for (const row of page) {
+          if (!row) continue;
+          const prev = got.get(row.id);
+          if (!prev || (!prev.ok && row.ok)) got.set(row.id, row);
+        }
+
+        const stillBad = slice.some(chapter => {
+          const row = got.get(chapter.id);
+          return !row || !row.ok;
+        });
+        if (!stillBad) break;
+        if (attempt === 0) await sleep(900);
+        else {
           delay = Math.min(1600, Math.round(delay * 1.5));
           await sleep(1200);
         }
       }
-      if (!batch) {
-        batch = slice.map(chapter => ({ id: chapter.id, title: chapter.title, ok: false, reason: 'network', text: '' }));
-      }
-      for (const row of batch) {
+
+      // 兜底：缺的章补占位行，宁可标注「未获取」也不会静默丢章
+      const ordered = slice.map(chapter => got.get(chapter.id) || {
+        id: chapter.id, title: chapter.title, ok: false, reason: 'network', text: '',
+      });
+      for (const row of ordered) {
         rows.push(row);
         if (!row.ok) failedCount += 1;
       }
@@ -515,6 +557,9 @@ async function runDownload({
     const okCount = appended.entries.filter(entry => entry.ok && !entry.skipped).length;
     const skippedCount = appended.entries.filter(entry => entry.skipped).length;
     const stillMissing = manifest.filter(entry => entry.ok === false).length;
+    // 自检：写入的条目数应当等于这一轮请求的章数（模板章也算一条），否则说明有章被静默丢弃
+    const expected = chapters.length;
+    const overflow = expected - appended.entries.length;
     const saved = await hooks.upsertBook({
       title,
       author: author || catalog.author,
@@ -535,6 +580,7 @@ async function runDownload({
       patched ? `补回旧章 ${patched} 章` : '',
       skippedCount ? `跳过模板章 ${skippedCount} 个` : '',
       stillMissing ? `${stillMissing} 章仍失败（可再次继续下载）` : '',
+      overflow > 0 ? `⚠ ${overflow} 章未能写入（请再点一次继续下载）` : '',
       cancelled ? '（已按停止保存）' : '',
     ].filter(Boolean).join('，') + '。';
     log.className = 'dl-status is-ok';
@@ -544,6 +590,8 @@ async function runDownload({
     log.className = 'dl-status is-warn';
   } finally {
     busy = false;
+    if (activeRunCancel === requestStop) activeRunCancel = null;
+    dialogEl.removeEventListener('close', requestStop);
     cancel.remove();
   }
 }
@@ -552,8 +600,8 @@ async function runDownload({
 export function setupDownload(options = {}) {
   hooks = { ...hooks, ...options };
   const trigger = $('downloadBtn');
-  const open = () => {
-    if (busy) return hooks.toast?.('上一本还在下载中');
+  const open = async () => {
+    await ensureIdle();
     openHome();
   };
   if (trigger) trigger.onclick = open;
@@ -563,7 +611,7 @@ export function setupDownload(options = {}) {
 /** 供书架「⋯ → 继续下载 / 更新」调用：按书籍 ID 直接走更新流程。 */
 export async function openUpdateForBook(remoteId, fallbackTitle = '') {
   if (!remoteId) return hooks.toast?.('这本书没有番茄来源，无法更新');
-  if (busy) return hooks.toast?.('上一本还在下载中');
+  await ensureIdle();
   await openBookPanel(remoteId, { title: fallbackTitle });
 }
 
