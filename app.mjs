@@ -1,9 +1,18 @@
-import { DEFAULT_SETTINGS, SAMPLE, decodeTxt, indexText, sectionAt, progressAt, isLowSurrogate } from './reader-core.mjs?v=17';
-import { listBooks, readText, saveBook, addBook, deleteBook } from './storage.mjs?v=17';
+import { DEFAULT_SETTINGS, SAMPLE, decodeTxt, indexText, sectionAt, progressAt, isLowSurrogate } from './reader-core.mjs?v=18';
+import {
+  listBooks, readText, saveBook, addBook, putBook, deleteBook,
+  saveMetaMirror, requestPersistentStorage,
+} from './storage.mjs?v=18';
 import {
   TtsController, EDGE_VOICES, SLEEP_OPTIONS,
   testTtsEndpoint, resolveApiEndpoint, loadLastListened, saveLastListened,
-} from './tts.mjs?v=17';
+} from './tts.mjs?v=18';
+import {
+  generateSyncKey, validateSyncKey, loadSyncKey, saveSyncKey, loadLastSyncTime,
+  markLocalDeleted, clearLocalDeleted, checkCloudStatus, pushBookMeta,
+  uploadBookFull, syncAllBooks, scheduleMetaSync, flushMetaSync,
+  exportLibraryBackup, importLibraryBackup,
+} from './sync.mjs?v=18';
 
 const $ = id => document.getElementById(id);
 const viewport = $('viewport');
@@ -40,6 +49,8 @@ function toast(message) {
 }
 
 function store(book) {
+  saveMetaMirror(books);
+  scheduleMetaSync(book);
   return saveBook(book).catch(() => toast('保存阅读进度失败。'));
 }
 
@@ -241,11 +252,16 @@ function bookActions(book) {
         event.currentTarget.disabled = true;
         try {
           await deleteBook(book.id);
+          markLocalDeleted(book.id);
           if (tts.active && tts.bookId === book.id) tts.stop();
           books = books.filter(item => item.id !== book.id);
+          saveMetaMirror(books);
           if (loadLastListened()?.bookId === book.id) saveLastListened(null);
           renderShelf();
           dialog.close();
+          if (loadSyncKey()) {
+            pushBookMeta(book, { deleted: true }).catch(() => {});
+          }
         } catch {
           dialog.close();
           toast('删除失败。');
@@ -281,8 +297,15 @@ async function importBuffer(file, buffer, encoding) {
   if (dialog.open) dialog.close();
   try {
     await addBook(book, text);
+    clearLocalDeleted(book.id);
     books.push(book);
+    saveMetaMirror(books);
     renderShelf();
+    if (loadSyncKey()) {
+      uploadBookFull(book, text)
+        .then(() => { updateCloudBtnState(); toast(`《${book.title}》已同步至私人云书库`); })
+        .catch(() => {});
+    }
     await openBook(book, text);
   } catch {
     toast('导入失败，请检查本机储存空间。');
@@ -1678,8 +1701,244 @@ document.addEventListener('visibilitychange', () => {
       const chunk = tts.getCurrentChunk();
       if (chunk) persistListeningProgress(chunk, tts.getCurrentAudioTime());
     }
+    flushMetaSync(true);
   }
 });
+window.addEventListener('pagehide', () => flushMetaSync(true));
+
+let persistInfo = { supported: false, persisted: false, usage: 0, quota: 0 };
+let syncBusy = false;
+
+function formatBytes(n) {
+  if (!n) return '0 KB';
+  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(n / 1024))} KB`;
+}
+
+function maskSyncKey(key) {
+  if (!key || key.length < 10) return key;
+  return `${key.slice(0, 7)}••••${key.slice(-4)}`;
+}
+
+function updateCloudBtnState() {
+  const btn = $('cloudSyncBtn');
+  const label = $('cloudSyncLabel');
+  if (!btn || !label) return;
+  const hasKey = Boolean(loadSyncKey());
+  btn.dataset.synced = String(hasKey);
+  btn.dataset.busy = String(syncBusy);
+  label.textContent = syncBusy ? '同步中' : hasKey ? '已同步' : '云备份';
+}
+
+async function runCloudSync({ silent = false, onStatus } = {}) {
+  if (!loadSyncKey() || syncBusy) return null;
+  syncBusy = true;
+  updateCloudBtnState();
+  try {
+    const summary = await syncAllBooks({
+      books,
+      readText,
+      putBook,
+      saveBook,
+      deleteLocalBook: deleteBook,
+      onStatus,
+    });
+    books = await listBooks();
+    saveMetaMirror(books);
+    renderShelf();
+    updateCloudBtnState();
+    if (!silent) {
+      const parts = [];
+      if (summary.downloaded) parts.push(`恢复 ${summary.downloaded} 本`);
+      if (summary.uploaded) parts.push(`上传 ${summary.uploaded} 本`);
+      if (summary.merged) parts.push(`合并进度 ${summary.merged} 本`);
+      toast(parts.length ? `私人云书库同步完成：${parts.join('，')}` : '私人云书库已是最新。');
+    } else if (summary.downloaded > 0) {
+      toast(`已从私人云书库自动恢复 ${summary.downloaded} 本书`);
+    }
+    return summary;
+  } catch (err) {
+    if (!silent) toast(`云同步失败：${err?.message || '请稍后重试'}`);
+    return null;
+  } finally {
+    syncBusy = false;
+    updateCloudBtnState();
+  }
+}
+
+function openVaultDialog(revealKey = false) {
+  const currentKey = loadSyncKey();
+  const lastSync = loadLastSyncTime();
+
+  const statusBox = element('div', null, 'vault-status');
+  const persistText = persistInfo.persisted
+    ? '✓ 本机浏览器已开启持久化保护'
+    : '本机存储受系统清理策略影响（强烈建议开启下方私人云书库）';
+  const cloudText = currentKey
+    ? `✓ 私人云书库已开启${lastSync ? ` · 上次同步 ${formatTimeAgo(lastSync)}` : ''} · 仅你的专属同步码可访问`
+    : '未开启云同步 · 书籍仅保存在当前浏览器（Safari 与桌面图标不互通）';
+  statusBox.append(
+    element('strong', `当前书架 ${books.length} 本${persistInfo.usage ? ` · 本机占用 ${formatBytes(persistInfo.usage)}` : ''}`),
+    element('span', cloudText),
+    element('span', persistText),
+  );
+
+  // 区块 1：私人云书库（独立同步码，严格隔离不与朋友互通）
+  const cloudSec = element('div', null, 'vault-section');
+  cloudSec.append(
+    element('h3', '私人云书库（防丢 · 与朋友完全隔离）'),
+    element('p', '每位用户使用独立高强度同步码，服务端按加密哈希彻底隔离。换手机、清缓存或在 Safari 与桌面图标间切换时，粘贴同步码即可找回全部书籍、阅读进度、听书断点与书签。', 'vault-tip'),
+  );
+
+  const liveMsg = element('p', '', 'vault-tip');
+  liveMsg.hidden = true;
+
+  if (!currentKey) {
+    const genBtn = button('一键生成专属同步码并备份上云', async event => {
+      const btn = event.currentTarget;
+      btn.disabled = true;
+      liveMsg.hidden = false;
+      liveMsg.textContent = '正在创建你的独立私人云书库…';
+      try {
+        const key = generateSyncKey();
+        await checkCloudStatus(key);
+        saveSyncKey(key);
+        updateCloudBtnState();
+        await runCloudSync({
+          silent: false,
+          onStatus: msg => { liveMsg.textContent = msg; },
+        });
+        openVaultDialog(true);
+      } catch (err) {
+        liveMsg.textContent = `开通失败：${err?.message || '网络异常'}`;
+        btn.disabled = false;
+      }
+    }, 'primary');
+    const row1 = element('div', null, 'vault-btn-row');
+    row1.append(genBtn);
+
+    const inputRow = element('div', null, 'vault-input-row');
+    const keyInput = element('input');
+    keyInput.type = 'text';
+    keyInput.placeholder = '已有同步码？粘贴到这里恢复书架…';
+    keyInput.autocomplete = 'off';
+    keyInput.spellcheck = false;
+    const bindBtn = button('绑定并恢复', async () => {
+      const v = validateSyncKey(keyInput.value);
+      if (!v.ok) return toast(v.error);
+      bindBtn.disabled = true;
+      liveMsg.hidden = false;
+      liveMsg.textContent = '正在验证同步码并拉取你的云端书架…';
+      try {
+        await checkCloudStatus(v.key);
+        saveSyncKey(v.key);
+        updateCloudBtnState();
+        await runCloudSync({
+          silent: false,
+          onStatus: msg => { liveMsg.textContent = msg; },
+        });
+        openVaultDialog(false);
+      } catch (err) {
+        liveMsg.textContent = `连接失败：${err?.message || '请稍后重试'}`;
+        bindBtn.disabled = false;
+      }
+    });
+    inputRow.append(keyInput, bindBtn);
+    cloudSec.append(row1, inputRow, liveMsg);
+  } else {
+    let shown = revealKey;
+    const keyBox = element('div', null, 'vault-key-box');
+    const codeEl = element('span', shown ? currentKey : maskSyncKey(currentKey), 'vault-key-code');
+    const miniBtns = element('div', null, 'vault-sub-btns');
+    miniBtns.style.display = 'flex';
+    miniBtns.style.gap = '6px';
+    const toggleVis = button(shown ? '隐藏' : '显示', () => {
+      shown = !shown;
+      codeEl.textContent = shown ? currentKey : maskSyncKey(currentKey);
+      toggleVis.textContent = shown ? '隐藏' : '显示';
+    }, 'pill-btn');
+    const copyBtn = button('复制', async () => {
+      try {
+        await navigator.clipboard.writeText(currentKey);
+        toast('同步码已复制，请妥善保存到备忘录！');
+      } catch {
+        shown = true;
+        codeEl.textContent = currentKey;
+        toggleVis.textContent = '隐藏';
+        toast('请长按上方同步码手动复制。');
+      }
+    }, 'pill-btn');
+    miniBtns.append(toggleVis, copyBtn);
+    keyBox.append(codeEl, miniBtns);
+
+    const warnTip = element('p', '请把同步码存到备忘录，不要分享给朋友（不同人用各自同步码，数据完全隔离互不可见）。', 'vault-tip');
+
+    const actions = element('div', null, 'vault-btn-row');
+    const syncNowBtn = button('立即同步', async () => {
+      syncNowBtn.disabled = true;
+      liveMsg.hidden = false;
+      await runCloudSync({
+        silent: false,
+        onStatus: msg => { liveMsg.textContent = msg; },
+      });
+      if (dialog.open) openVaultDialog(shown);
+    }, 'primary');
+    const unbindBtn = button('退出同步码', () => {
+      saveSyncKey('');
+      updateCloudBtnState();
+      toast('已解除本机云同步绑定（本机书籍保留）。');
+      openVaultDialog(false);
+    });
+    actions.append(syncNowBtn, unbindBtn);
+    cloudSec.append(keyBox, warnTip, actions, liveMsg);
+  }
+
+  // 区块 2：本机整库离线备份（可存 iPhone 文件 / iCloud 云盘）
+  const localSec = element('div', null, 'vault-section');
+  localSec.append(
+    element('h3', '本机整库离线备份（iPhone 文件 / iCloud）'),
+    element('p', '将全部书籍、阅读进度、听书断点与书签压缩打包为一个备份文件，无需账号也能随时完整恢复。', 'vault-tip'),
+  );
+  const localActions = element('div', null, 'vault-btn-row');
+  localActions.append(
+    button('导出整库备份', async event => {
+      if (!books.length) return toast('书架还是空的。');
+      const btn = event.currentTarget;
+      btn.disabled = true;
+      try {
+        const count = await exportLibraryBackup(books, readText);
+        toast(`已导出 ${count} 本书的整库备份文件。`);
+      } catch {
+        toast('导出备份失败，请重试。');
+      } finally {
+        btn.disabled = false;
+      }
+    }),
+    button('从备份文件恢复', () => { $('backupInput').click(); }),
+  );
+  localSec.append(localActions);
+
+  openDialog('书籍防丢与云备份', statusBox, cloudSec, localSec);
+}
+
+$('cloudSyncBtn').onclick = () => openVaultDialog(false);
+$('backupInput').onchange = async event => {
+  const file = event.currentTarget.files?.[0];
+  event.currentTarget.value = '';
+  if (!file) return;
+  try {
+    toast('正在恢复备份文件…');
+    const count = await importLibraryBackup(file, books, putBook);
+    books = await listBooks();
+    saveMetaMirror(books);
+    renderShelf();
+    if (dialog.open) dialog.close();
+    toast(`已成功恢复 ${count} 本书及其阅读/听书进度！`);
+    if (loadSyncKey()) runCloudSync({ silent: true });
+  } catch (err) {
+    toast(`恢复失败：${err?.message || '请确认是页灯整库备份文件'}`);
+  }
+};
 
 // 手机上不需要双指缩放或双击放大，字号由阅读设置控制。
 for (const type of ['gesturestart', 'gesturechange', 'gestureend']) {
@@ -1690,9 +1949,16 @@ document.addEventListener('touchmove', event => {
 }, { passive: false });
 document.addEventListener('dblclick', event => event.preventDefault(), { passive: false });
 
+updateCloudBtnState();
+requestPersistentStorage().then(info => { persistInfo = info; }).catch(() => {});
+
 try {
   books = await listBooks();
+  if (books.length) saveMetaMirror(books);
   renderShelf();
+  if (loadSyncKey()) {
+    runCloudSync({ silent: true });
+  }
 } catch {
   $('importBtn').disabled = $('sampleBtn').disabled = true;
   $('bookList').textContent = '本机存储不可用。请使用 Safari 正常浏览模式打开此网页。';
