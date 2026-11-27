@@ -457,18 +457,45 @@ function openResumePanel({ bookId, catalog, existing, seed }) {
     return;
   }
 
-  // 章序自检：书名里的「第N章」应当单调递增；倒挂说明正文顺序被旧版本拼乱
-  const chapterNo = title => Number((String(title || '').match(/第\s*(\d+)\s*章/) || [])[1] || 0);
-  const seq = manifest.map(entry => chapterNo(entry.title)).filter(Boolean);
-  let inversions = 0;
-  for (let i = 1; i < seq.length; i += 1) if (seq[i] < seq[i - 1]) inversions += 1;
+  // 章序自检：正文里第 i 条应当正好是目录第 i+1 章。
+  // 只要出现「位置漂移」或「跳章」，说明这本书的正文是旧版本按错误偏移拼出来的，增量补只会越补越乱。
+  const posById = new Map(catalog.chapters.map((chapter, index) => [chapter.id, index + 1]));
+  let drift = 0;
+  let jumps = 0;
+  let unknown = 0;
+  let prevPos = 0;
+  manifest.forEach((entry, index) => {
+    const pos = posById.get(entry.id) || 0;
+    if (!pos) { unknown += 1; return; }
+    if (pos !== index + 1) drift += 1;
+    if (prevPos && pos !== prevPos + 1) jumps += 1;
+    prevPos = pos;
+  });
+  const broken = drift > 0 || jumps > 0;
 
-  const uptoDate = missing.length === 0 && failed.length === 0;
-  const start = button(uptoDate ? '已是最新（重新核对）' : `继续下载（${missing.length} 新章${failed.length ? ` + 补 ${failed.length} 章` : ''}）`, async () => {
-    writeSetting(PACE_KEY, pace.value);
-    const task = createTask({ remoteId: bookId, title, mode: 'update', pace: pace.value });
-    await pumpQueue(body, task.id);
-  }, 'primary');
+  const uptoDate = missing.length === 0 && failed.length === 0 && !broken;
+  const start = button(
+    broken
+      ? '章序异常，先重新下载整本'
+      : (uptoDate ? '已是最新（重新核对）' : `继续下载（${missing.length} 新章${failed.length ? ` + 补 ${failed.length} 章` : ''}）`),
+    async () => {
+      if (broken) {
+        openPanel('先修复这本书',
+          statusLine(`检测到 ${drift || jumps} 处章序异常：正文里的第 N 条不是目录第 N 章。继续增量补章会把它拼得更乱。`, 'is-warn'),
+          statusLine('建议点「重新下载整本」：会按目录顺序重抓正文，阅读进度和书签保留。'),
+          actionRow(button('重新下载整本', async () => {
+            writeSetting(PACE_KEY, pace.value);
+            const fixTask = createTask({ remoteId: bookId, title, mode: 'replace', pace: pace.value, replace: true });
+            await pumpQueue(body, fixTask.id);
+          }, 'primary'), button('返回', () => openResumePanel({ bookId, catalog, existing: { ...existing }, seed }), 'secondary')));
+        return;
+      }
+      writeSetting(PACE_KEY, pace.value);
+      const task = createTask({ remoteId: bookId, title, mode: 'update', pace: pace.value });
+      await pumpQueue(body, task.id);
+    },
+    broken ? 'secondary' : 'primary',
+  );
 
   const paceRow = element('div', null, 'dl-row');
   paceRow.append(element('span', '节奏', 'dl-row-label'), pace);
@@ -480,8 +507,8 @@ function openResumePanel({ bookId, catalog, existing, seed }) {
       + (failed.length ? ` · 上次失败 ${failed.length} 章` : '')
       + (uptoDate ? ' · 已经是最新' : ''),
     uptoDate ? 'is-ok' : ''),
-    inversions > 0
-      ? statusLine(`⚠ 检测到章序错乱 ${inversions} 处（旧版本拼接所致），建议「重新下载整本」`, 'is-warn')
+    broken
+      ? statusLine(`⚠ 检测到章序异常 ${drift || jumps} 处${unknown ? `（另有 ${unknown} 章已不在目录里）` : ''}：正文第 N 条不是目录第 N 章，继续增量补只会更乱，请先「重新下载整本」。`, 'is-warn')
       : null,
     paceRow,
     actionRow(start, button('下载任务', () => openTasksPanel(), 'secondary'), button('重新下载整本', () => {
