@@ -27,6 +27,86 @@ let hooks = {
 };
 let busy = false;
 let activeRunCancel = null;
+let currentTaskId = null;
+
+// ---------- 下载任务队列（本地持久化） ----------
+const TASKS_KEY = 'yeding-dl-tasks-v1';
+const TASK_KEEP = 20;
+
+function loadTasks() {
+  try {
+    const raw = localStorage.getItem(TASKS_KEY);
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveTasks(list) {
+  try {
+    localStorage.setItem(TASKS_KEY, JSON.stringify(list.slice(0, TASK_KEEP)));
+  } catch {}
+}
+
+function updateTask(id, patch) {
+  const list = loadTasks();
+  const task = list.find(item => item.id === id);
+  if (!task) return null;
+  Object.assign(task, patch, { updatedAt: Date.now() });
+  saveTasks(list);
+  return task;
+}
+
+function removeTask(id) {
+  saveTasks(loadTasks().filter(item => item.id !== id));
+}
+
+/** 同一本书只保留一个任务，避免队列里堆一地重复项。 */
+function createTask({ remoteId, title, mode, pace, replace = false, limit = 0 }) {
+  const running = loadTasks().find(item => item.remoteId === remoteId
+    && ['queued', 'running', 'pausing'].includes(item.status));
+  if (running) return running;
+  const list = loadTasks().filter(item => item.remoteId !== remoteId);
+  const task = {
+    id: `t-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    remoteId,
+    title: title || `书籍 ${remoteId}`,
+    mode, // fresh | update | replace
+    pace: pace || 'normal',
+    replace: Boolean(replace),
+    limit: Number(limit) || 0,
+    status: 'queued',
+    done: 0,
+    total: 0,
+    added: 0,
+    message: '等待开始',
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  list.unshift(task);
+  saveTasks(list);
+  return task;
+}
+
+// 页面一刷新，之前标记为「下载中」的任务其实已经不在跑了，统一归位成「已暂停」
+function normalizeTasksOnLoad() {
+  const list = loadTasks();
+  let changed = false;
+  for (const task of list) {
+    if (task.status === 'running' || task.status === 'pausing') {
+      task.status = 'paused';
+      task.message = '页面已关闭，已暂停（点继续接着下）';
+      changed = true;
+    }
+  }
+  if (changed) saveTasks(list);
+}
+normalizeTasksOnLoad();
+
+function pendingCount() {
+  return loadTasks().filter(task => task.status === 'queued' || task.status === 'running' || task.status === 'pausing').length;
+}
 
 const $ = id => document.getElementById(id);
 
@@ -113,14 +193,65 @@ function paceSelectElement() {
   return select;
 }
 
-/** 如果上一次下载还在跑，先停掉并等它收尾，避免 busy 卡住新操作。 */
-async function ensureIdle() {
-  if (!busy) return;
-  activeRunCancel?.();
-  for (let i = 0; i < 24 && busy; i += 1) await sleep(150);
+// ---------- 面板：搜索 ----------
+const STATUS_TEXT = {
+  queued: '等待中', running: '下载中', pausing: '暂停中', paused: '已暂停',
+  stopped: '已停止', done: '已完成', error: '失败',
+};
+let taskTimer = null;
+
+function renderTaskList(box) {
+  const tasks = loadTasks();
+  if (!tasks.length) {
+    box.replaceChildren(element('p', '还没有下载任务。下过的书会出现在这里，可暂停 / 继续。', 'dl-hint'));
+    return;
+  }
+  box.replaceChildren(...tasks.map(task => {
+    const pct = task.total ? Math.round(task.done * 100 / task.total) : 0;
+    const status = STATUS_TEXT[task.status] || task.status;
+    const row = element('div', null, 'dl-task');
+    const info = element('div', null, 'dl-task-info');
+    info.append(
+      element('strong', task.title, 'dl-task-title'),
+      element('span', `${status} · 已取 ${task.done}/${task.total || '?'} 章${task.total ? ` · ${pct}%` : ''}`,
+        `dl-task-meta${task.status === 'done' ? ' is-ok' : task.status === 'error' ? ' is-warn' : ''}`),
+      task.message && task.status !== 'running' ? element('span', task.message, 'dl-task-msg') : null,
+    );
+    const bar = element('div', null, 'dl-bar');
+    const fill = element('span');
+    fill.style.width = `${pct}%`;
+    bar.append(fill);
+
+    const actions = element('div', null, 'dl-task-actions');
+    if (task.status === 'running') {
+      actions.append(button('暂停', () => { pauseTask(task.id); renderTaskList(box); }, 'secondary'));
+    } else if (task.status === 'queued' || task.status === 'paused' || task.status === 'stopped' || task.status === 'error') {
+      actions.append(button('继续', async () => {
+        await resumeTask(task.id, null);
+        renderTaskList(box);
+      }, 'secondary'));
+    } else if (task.status === 'pausing') {
+      actions.append(button('暂停中…', () => {}, 'secondary'));
+    }
+    actions.append(button('移除', () => { removeTask(task.id); renderTaskList(box); }, 'secondary'));
+    row.append(info, bar, actions);
+    return row;
+  }));
 }
 
-// ---------- 面板：搜索 ----------
+function mountTaskList(box) {
+  renderTaskList(box);
+  if (taskTimer) clearInterval(taskTimer);
+  taskTimer = setInterval(() => {
+    if (!$('dialog').open || !document.body.contains(box)) {
+      clearInterval(taskTimer);
+      taskTimer = null;
+      return;
+    }
+    renderTaskList(box);
+  }, 1500);
+}
+
 function openHome(message = '') {
   const input = element('input', null, 'dl-input');
   input.type = 'search';
@@ -193,8 +324,13 @@ function openHome(message = '') {
     button('账号 Cookie / 代理', openAdvanced, 'secondary'),
   );
 
+  const taskBox = element('div', null, 'dl-tasks');
+  mountTaskList(taskBox);
+
   openPanel('下载番茄小说', warn, input, actions, resultBox,
-    element('p', '把番茄上的小说抓到本机书架。已在书架里的书再次打开会走「继续下载 / 更新」，只补新章和上次失败的章。', 'dl-hint'));
+    element('p', '把番茄上的小说抓到本机书架。已在书架里的书再次打开会走「继续下载 / 更新」，只补新章和上次失败的章。', 'dl-hint'),
+    element('h3', '下载任务', 'dl-section'),
+    taskBox);
   input.focus({ preventScroll: true });
 }
 
@@ -269,10 +405,8 @@ function openFreshPanel({ bookId, catalog, seed }) {
   const start = button(`下载 ${cap} 章`, async () => {
     const limit = Math.max(1, Math.min(cap, Number(limitInput.value) || cap));
     writeSetting(PACE_KEY, pace.value);
-    await runDownload({
-      bookId, catalog, existing: null, container: body,
-      title, author: catalog.author, chapters: all.slice(0, limit), pace: PACE[pace.value],
-    });
+    const task = createTask({ remoteId: bookId, title, mode: 'fresh', pace: pace.value, limit });
+    await pumpQueue(body, task.id);
   }, 'primary');
 
   const limitRow = element('div', null, 'dl-row');
@@ -285,7 +419,7 @@ function openFreshPanel({ bookId, catalog, seed }) {
     element('span', meta, 'dl-meta'),
     catalog.abstract ? element('p', catalog.abstract, 'dl-abstract') : null,
     statusLine(`共 ${all.length} 章，默认整本下载（约 ${minutes} 分钟）。被限流时会自动放慢并更换设备身份续抓；取不到的章节会在正文里标注，事后可「继续下载」补回。`),
-    limitRow, paceRow, actionRow(start), body);
+    limitRow, paceRow, actionRow(start, button('下载任务', () => openHome(), 'secondary')), body);
 }
 
 function openResumePanel({ bookId, catalog, existing, seed }) {
@@ -305,11 +439,8 @@ function openResumePanel({ bookId, catalog, existing, seed }) {
       statusLine('《' + title + '》没有章节清单，无法只补新章。可以让它重新拉取整本并替换正文（阅读进度、书签保留）。', 'is-warn'),
       actionRow(button('重新下载整本', async () => {
         writeSetting(PACE_KEY, pace.value);
-        await runDownload({
-          bookId, catalog, existing, container: body,
-          title, author: catalog.author, chapters: catalog.chapters.slice(0, MAX_CHAPTERS),
-          pace: PACE[pace.value], replace: true,
-        });
+        const task = createTask({ remoteId: bookId, title, mode: 'replace', pace: pace.value, replace: true });
+            await pumpQueue(body, task.id);
       }, 'primary'), button('取消', () => openHome(), 'secondary')),
       body);
     return;
@@ -318,13 +449,8 @@ function openResumePanel({ bookId, catalog, existing, seed }) {
   const uptoDate = missing.length === 0 && failed.length === 0;
   const start = button(uptoDate ? '已是最新（重新核对）' : `继续下载（${missing.length} 新章${failed.length ? ` + 补 ${failed.length} 章` : ''}）`, async () => {
     writeSetting(PACE_KEY, pace.value);
-    await runDownload({
-      bookId, catalog, existing, container: body,
-      title, author: catalog.author,
-      chapters: missing.slice(0, MAX_CHAPTERS),
-      retryFailed: failed,
-      pace: PACE[pace.value],
-    });
+    const task = createTask({ remoteId: bookId, title, mode: 'update', pace: pace.value });
+    await pumpQueue(body, task.id);
   }, 'primary');
 
   const paceRow = element('div', null, 'dl-row');
@@ -338,16 +464,13 @@ function openResumePanel({ bookId, catalog, existing, seed }) {
       + (uptoDate ? ' · 已经是最新' : ''),
     uptoDate ? 'is-ok' : ''),
     paceRow,
-    actionRow(start, button('重新下载整本', () => {
+    actionRow(start, button('下载任务', () => openHome(), 'secondary'), button('重新下载整本', () => {
       openPanel('重新下载整本？',
         statusLine('会用番茄上的最新内容替换这本书的正文，阅读进度和书签保留。', 'is-warn'),
         actionRow(button('确认替换', async () => {
           writeSetting(PACE_KEY, pace.value);
-          await runDownload({
-            bookId, catalog, existing, container: body,
-            title, author: catalog.author, chapters: catalog.chapters.slice(0, MAX_CHAPTERS),
-            pace: PACE[pace.value], replace: true,
-          });
+          const task = createTask({ remoteId: bookId, title, mode: 'replace', pace: pace.value, replace: true });
+                await pumpQueue(body, task.id);
         }, 'primary'), button('取消', () => openHome(), 'secondary')));
     }, 'secondary')),
     body);
@@ -391,26 +514,34 @@ function patchEntry(text, manifest, index, block, ok) {
 }
 
 async function runDownload({
-  bookId, catalog, existing, container, title, author, chapters, retryFailed = [], pace, replace = false,
+  bookId, catalog, existing, container, title, author, chapters, retryFailed = [], pace, replace = false, task = null,
 }) {
   if (busy) return;
   busy = true;
   let cancelled = false;
+  let stopReason = '';
+  const requestStop = reason => {
+    cancelled = true;
+    if (reason && !stopReason) stopReason = reason;
+  };
   const indexOf = new Map(catalog.chapters.map((chapter, index) => [chapter.id, index]));
+  container = container || document.createElement('div');
   container.replaceChildren();
 
   const bar = element('div', null, 'dl-bar');
   const fill = element('span');
   bar.append(fill);
   const log = statusLine('准备下载…');
-  const cancel = button('停止', () => { cancelled = true; }, 'secondary dl-cancel');
-  container.append(log, bar, actionRow(cancel));
+  const pauseBtn = button('暂停', () => requestStop('pause'), 'secondary dl-cancel');
+  const cancel = button('停止', () => requestStop('stop'), 'secondary dl-cancel');
+  container.append(log, bar, actionRow(pauseBtn, cancel));
 
   // 关掉面板 = 停止这次下载（已取到的章照常保存），避免 busy 一直挂着
   const dialogEl = $('dialog');
-  const requestStop = () => { cancelled = true; };
-  activeRunCancel = requestStop;
-  dialogEl.addEventListener('close', requestStop);
+  const onDialogClose = () => requestStop('stop');
+  activeRunCancel = reason => requestStop(reason || 'stop');
+  currentTaskId = task?.id || null;
+  dialogEl.addEventListener('close', onDialogClose);
 
   const rows = [];
   let failedCount = 0;
@@ -434,6 +565,12 @@ async function runDownload({
     const eta = done > 0 ? Math.round(elapsed / done * (total - done) / 60) : 0;
     const tail = [failedCount ? `${failedCount} 章被拒重试中` : '', rotations ? `换设备 ${rotations} 次` : ''].filter(Boolean).join('，');
     log.textContent = `已取 ${done} / ${total} 章${eta > 0 ? ` · 约剩 ${eta} 分钟` : ''}${tail ? ` · ${tail}` : ''}${extra ? ` · ${extra}` : ''}`;
+    if (task) {
+      task.done = done;
+      task.total = total;
+      task.message = log.textContent;
+      updateTask(task.id, { done, total, message: task.message, status: 'running' });
+    }
   };
 
   try {
@@ -557,9 +694,9 @@ async function runDownload({
     const okCount = appended.entries.filter(entry => entry.ok && !entry.skipped).length;
     const skippedCount = appended.entries.filter(entry => entry.skipped).length;
     const stillMissing = manifest.filter(entry => entry.ok === false).length;
-    // 自检：写入的条目数应当等于这一轮请求的章数（模板章也算一条），否则说明有章被静默丢弃
-    const expected = chapters.length;
-    const overflow = expected - appended.entries.length;
+    // 自检：写入条目数应当等于「本轮真正取到的章数」（模板章也算一条），暂停/停止时不报警
+    const expected = rows.length - patched;
+    const overflow = Math.max(0, expected - appended.entries.length);
     const saved = await hooks.upsertBook({
       title,
       author: author || catalog.author,
@@ -581,19 +718,112 @@ async function runDownload({
       skippedCount ? `跳过模板章 ${skippedCount} 个` : '',
       stillMissing ? `${stillMissing} 章仍失败（可再次继续下载）` : '',
       overflow > 0 ? `⚠ ${overflow} 章未能写入（请再点一次继续下载）` : '',
-      cancelled ? '（已按停止保存）' : '',
+      cancelled ? (stopReason === 'pause' ? '（已暂停，进度已保存）' : '（已按停止保存）') : '',
     ].filter(Boolean).join('，') + '。';
     log.className = 'dl-status is-ok';
+    if (task) updateTask(task.id, { added: okCount, message: log.textContent });
     container.append(actionRow(button('开始阅读', () => { if (saved) hooks.openBook?.(saved); }, 'primary')));
   } catch (err) {
     log.textContent = err.message || '下载中断';
     log.className = 'dl-status is-warn';
+    if (task) updateTask(task.id, { status: 'error', message: log.textContent });
   } finally {
     busy = false;
-    if (activeRunCancel === requestStop) activeRunCancel = null;
-    dialogEl.removeEventListener('close', requestStop);
+    activeRunCancel = null;
+    currentTaskId = null;
+    dialogEl.removeEventListener('close', onDialogClose);
     cancel.remove();
+    pauseBtn.remove();
+    if (task) {
+      const status = cancelled ? (stopReason === 'pause' ? 'paused' : 'stopped') : 'done';
+      updateTask(task.id, { status });
+    }
   }
+}
+
+// ---------- 任务执行 ----------
+async function startTask(task, container = null) {
+  updateTask(task.id, { status: 'running', message: '读取目录…' });
+  let catalog;
+  try {
+    const data = await api(`book?id=${encodeURIComponent(task.remoteId)}`);
+    catalog = data.book;
+  } catch (err) {
+    updateTask(task.id, { status: 'error', message: err.message || '目录读取失败' });
+    return;
+  }
+
+  const existing = hooks.findBookByRemote?.(task.remoteId) || null;
+  const manifest = existing?.dl?.manifest || [];
+  const have = new Set(manifest.map(entry => entry.id));
+  const retryFailed = manifest.filter(entry => entry.ok === false);
+
+  let chapters;
+  if (task.replace) {
+    chapters = catalog.chapters.slice(0, MAX_CHAPTERS);
+  } else {
+    // 先把「这一轮的目标范围」定死（整本 / 前 N 章），再按清单做差集：
+    // 暂停后继续只补这个范围里还没下的章，不会多取也不会从头重取
+    const windowSize = task.mode === 'update'
+      ? MAX_CHAPTERS
+      : (task.limit || Math.min(catalog.chapters.length, MAX_CHAPTERS));
+    chapters = catalog.chapters.slice(0, windowSize).filter(chapter => !have.has(chapter.id));
+  }
+
+  updateTask(task.id, { total: chapters.length + retryFailed.length });
+
+  await runDownload({
+    bookId: task.remoteId,
+    catalog,
+    existing,
+    container,
+    title: catalog.title || task.title,
+    author: catalog.author,
+    chapters,
+    retryFailed,
+    pace: PACE[task.pace] || PACE.normal,
+    replace: Boolean(task.replace),
+    task,
+  });
+}
+
+let pumping = false;
+async function pumpQueue(container = null, focusId = null) {
+  if (pumping) return;
+  pumping = true;
+  try {
+    for (;;) {
+      const next = loadTasks().find(task => task.status === 'queued');
+      if (!next) break;
+      const target = focusId && next.id === focusId ? container : null;
+      await startTask(next, target);
+      focusId = null;
+    }
+  } finally {
+    pumping = false;
+  }
+}
+
+export function pauseTask(id) {
+  const task = loadTasks().find(item => item.id === id);
+  if (!task) return;
+  if (task.status === 'running' && currentTaskId === id) {
+    activeRunCancel?.('pause');
+    updateTask(id, { status: 'pausing', message: '正在暂停…' });
+  } else {
+    updateTask(id, { status: 'paused', message: '已暂停' });
+  }
+}
+
+export async function resumeTask(id, container = null) {
+  const task = loadTasks().find(item => item.id === id);
+  if (!task) return;
+  updateTask(id, { status: 'queued', message: '等待继续' });
+  if (busy) {
+    hooks.toast?.('已加入队列，等当前任务结束后自动开始');
+    return;
+  }
+  await pumpQueue(container, id);
 }
 
 // ---------- 对外入口 ----------
@@ -601,7 +831,6 @@ export function setupDownload(options = {}) {
   hooks = { ...hooks, ...options };
   const trigger = $('downloadBtn');
   const open = async () => {
-    await ensureIdle();
     openHome();
   };
   if (trigger) trigger.onclick = open;
@@ -611,7 +840,6 @@ export function setupDownload(options = {}) {
 /** 供书架「⋯ → 继续下载 / 更新」调用：按书籍 ID 直接走更新流程。 */
 export async function openUpdateForBook(remoteId, fallbackTitle = '') {
   if (!remoteId) return hooks.toast?.('这本书没有番茄来源，无法更新');
-  await ensureIdle();
   await openBookPanel(remoteId, { title: fallbackTitle });
 }
 
