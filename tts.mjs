@@ -1,4 +1,7 @@
-// 页灯听书引擎：支持免费多角色智能分声（旁白+男女对话自动切换）、iPhone 锁屏防断流连播、听书断点记录与浏览器原生离线兜底。
+// 页灯听书引擎：
+// - 免费多角色智能分声（旁白+男女对话自动切换）
+// - 逐自然段精准切分、高亮与秒级断点续听
+// - 后台提前缓存 8 段 + 客户端多段 MP3 无缝拼轨（同轨内段间 0ms 卡顿，兼顾 iPhone 锁屏稳播）
 
 const SETTINGS_KEY = 'yeding-tts-settings-v1';
 const LAST_LISTENED_KEY = 'yeding-tts-last-listened-v1';
@@ -88,7 +91,7 @@ export function saveTtsSettings(settings) {
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
   } catch {
-    // 隐私模式或存储满时忽略持久化失败
+    // 忽略存储异常
   }
 }
 
@@ -110,16 +113,16 @@ export function saveLastListened(record) {
   }
 }
 
-// 多角色自动分声：识别旁白与引号内对话，结合前后文称呼/人称智能分配男女声。
+// 多角色自动分声：识别旁白与引号内对话，结合紧邻上下文智能分配男女声。
 const FEMALE_CUE = /她|姑娘|少女|女孩|女士|小姐|夫人|太太|妻子|老婆|妈妈|母亲|母后|姐姐|妹妹|师姐|师妹|学姐|学妹|阿姨|大嫂|嫂子|大娘|婆婆|公主|皇后|妃|仙子|丫鬟|女秘书|女助理|娇声|娇笑|柔声|轻笑|抿嘴|眨眨眼/;
 const MALE_CUE = /他|男子|男人|少年|男孩|先生|书记|县长|市长|局长|主任|老板|总管|老头|大叔|大哥|兄弟|小弟|爷爷|父亲|爸爸|师兄|师弟|少爷|公子|王爷|皇帝|将军|队长|老大|大喝|冷哼|沉声|皱眉|朗声/;
 
 const ROLE_VOICES = Object.freeze({
-  narrator: 'zh-CN-YunjianNeural', // 沉稳大叔旁白
-  maleA: 'zh-CN-YunxiNeural',      // 青年男声 A
-  maleB: 'zh-CN-YunyangNeural',    // 青叔男声 B（双男对话交替）
-  femaleA: 'zh-CN-XiaoxiaoNeural', // 温柔女声 A
-  femaleB: 'zh-CN-XiaoyiNeural',   // 甜美少女 B
+  narrator: 'zh-CN-YunjianNeural',
+  maleA: 'zh-CN-YunxiNeural',
+  maleB: 'zh-CN-YunyangNeural',
+  femaleA: 'zh-CN-XiaoxiaoNeural',
+  femaleB: 'zh-CN-XiaoyiNeural',
 });
 
 export function segmentMultiRole(text) {
@@ -136,13 +139,11 @@ export function segmentMultiRole(text) {
       if (narr) rawParts.push({ text: narr, voice: ROLE_VOICES.narrator });
     }
     const quote = match[0].trim();
-    // 仅截取紧邻本句对话的归属上下文（不跨越前一个引号或句号/换行，避免串角色）
     const rawBefore = text.slice(Math.max(0, match.index - 28), match.index);
     const before = rawBefore.split(/[”」』"\n]/).pop() || '';
     const rawAfter = text.slice(match.index + match[0].length, match.index + match[0].length + 24);
     const after = rawAfter.split(/[“「『"\n]/)[0] || '';
 
-    // 紧接引号前的引导语（如“她轻轻一笑，”或“老周说：”）优先级最高
     const leadIsCue = /[，,：:]$/.test(before.trim());
     const afterIsOwnTag = after.trim().length > 0 && !/[，,：:]$/.test(after.trim());
     const primary = leadIsCue ? before : afterIsOwnTag ? after : `${before} ${after}`;
@@ -172,7 +173,6 @@ export function segmentMultiRole(text) {
     return [{ text: text.trim(), voice: ROLE_VOICES.narrator }];
   }
 
-  // 合并相邻同音色片段，减少上游合成次数
   const merged = [];
   for (const part of rawParts) {
     const prev = merged[merged.length - 1];
@@ -185,7 +185,111 @@ export function segmentMultiRole(text) {
   return merged;
 }
 
-// 生成 1 秒静音 WAV Blob URL，用于在弱网加载下一段音频时维持 iOS 后台音频会话不被系统挂起。
+// 精确解析 MP3 帧时长（兼容 Edge-TTS MPEG-2 24kHz 48kbps 及常见 MPEG-1/2 Layer III），
+// 并自动跳过拼接块中的 ID3 / Xing / Info 元数据头帧，确保多段拼接无爆音且时间轴精确到毫秒。
+const BR_MPEG1_L3 = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320];
+const BR_MPEG2_L3 = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160];
+const SR_MPEG1 = [44100, 48000, 32000];
+const SR_MPEG2 = [22050, 24000, 16000];
+const SR_MPEG25 = [11025, 12000, 8000];
+
+function containsTag(u8, start, end, tag) {
+  const limit = Math.min(end, u8.length) - tag.length;
+  for (let i = start; i <= limit; i++) {
+    let ok = true;
+    for (let j = 0; j < tag.length; j++) {
+      if (u8[i + j] !== tag.charCodeAt(j)) { ok = false; break; }
+    }
+    if (ok) return true;
+  }
+  return false;
+}
+
+export function stripMp3MetadataFrame(u8) {
+  let pos = 0;
+  // 跳过开头 ID3v2 标签（若有）
+  if (u8.length > 10 && u8[0] === 0x49 && u8[1] === 0x44 && u8[2] === 0x33) {
+    const id3Len = ((u8[6] & 0x7f) << 21) | ((u8[7] & 0x7f) << 14) | ((u8[8] & 0x7f) << 7) | (u8[9] & 0x7f);
+    pos = Math.min(u8.length, 10 + id3Len);
+  }
+  // 检查首帧是否为 Xing/Info 头帧，若是则剥离，避免拼接时覆盖总时长
+  if (pos + 4 <= u8.length && u8[pos] === 0xff && (u8[pos + 1] & 0xe0) === 0xe0) {
+    const ver = (u8[pos + 1] >> 3) & 3;
+    const brIdx = (u8[pos + 2] >> 4) & 0xf;
+    const srIdx = (u8[pos + 2] >> 2) & 3;
+    const pad = (u8[pos + 2] >> 1) & 1;
+    const br = (ver === 3 ? BR_MPEG1_L3[brIdx] : BR_MPEG2_L3[brIdx]) * 1000;
+    const sr = ver === 3 ? SR_MPEG1[srIdx] : ver === 2 ? SR_MPEG2[srIdx] : SR_MPEG25[srIdx];
+    if (br && sr) {
+      const flen = Math.floor(((ver === 3 ? 144 : 72) * br) / sr) + pad;
+      if (pos + flen <= u8.length && (containsTag(u8, pos, pos + flen, 'Xing') || containsTag(u8, pos, pos + flen, 'Info'))) {
+        pos += flen;
+      }
+    }
+  }
+  return pos > 0 ? u8.subarray(pos) : u8;
+}
+
+export function measureMp3Duration(u8) {
+  let pos = 0;
+  let totalSec = 0;
+  let frames = 0;
+  while (pos + 4 <= u8.length) {
+    if (u8[pos] === 0xff && (u8[pos + 1] & 0xe0) === 0xe0) {
+      const ver = (u8[pos + 1] >> 3) & 3;
+      const layer = (u8[pos + 1] >> 1) & 3;
+      const brIdx = (u8[pos + 2] >> 4) & 0xf;
+      const srIdx = (u8[pos + 2] >> 2) & 3;
+      const pad = (u8[pos + 2] >> 1) & 1;
+      if (layer !== 1 || ver === 1 || brIdx === 0 || brIdx === 15 || srIdx === 3) {
+        pos++;
+        continue;
+      }
+      const br = (ver === 3 ? BR_MPEG1_L3[brIdx] : BR_MPEG2_L3[brIdx]) * 1000;
+      const sr = ver === 3 ? SR_MPEG1[srIdx] : ver === 2 ? SR_MPEG2[srIdx] : SR_MPEG25[srIdx];
+      const samples = ver === 3 ? 1152 : 576;
+      const flen = Math.floor(((ver === 3 ? 144 : 72) * br) / sr) + pad;
+      if (flen <= 0 || pos + flen > u8.length) break;
+      totalSec += samples / sr;
+      frames++;
+      pos += flen;
+    } else {
+      pos++;
+    }
+  }
+  return frames > 0 ? totalSec : u8.byteLength / 6000;
+}
+
+export function stitchMp3Segments(items) {
+  // items: [{ chunkIndex, bytes: Uint8Array }]
+  const cleaned = [];
+  const timeline = [];
+  let cursorSec = 0;
+  let totalBytes = 0;
+
+  for (let i = 0; i < items.length; i++) {
+    const raw = items[i].bytes;
+    const part = i === 0 ? raw : stripMp3MetadataFrame(raw);
+    const dur = measureMp3Duration(part);
+    timeline.push({
+      chunkIndex: items[i].chunkIndex,
+      startSec: cursorSec,
+      endSec: cursorSec + dur,
+    });
+    cursorSec += dur;
+    totalBytes += part.byteLength;
+    cleaned.push(part);
+  }
+
+  const merged = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const part of cleaned) {
+    merged.set(part, offset);
+    offset += part.byteLength;
+  }
+  return { bytes: merged, timeline, totalSec: cursorSec };
+}
+
 function createSilentWavUrl() {
   const sampleRate = 8000;
   const numSamples = sampleRate;
@@ -250,10 +354,6 @@ function splitLongParagraph(text, startOffset, maxChars) {
   return parts;
 }
 
-// 按自然段精准切分朗读块：
-// - 正常自然段（>= 28 字且 <= 140 字）严格独立成块，实现单段精准高亮与零重复起播；
-// - 超长自然段（> 140 字）按句末标点拆分为 80~140 字语义短句；
-// - 极短段（< 28 字，如短标题或“嗯。”）仅与紧邻下一段合并至 >= 28 字，确保每段音频 >= 3 秒，防止 iPhone 锁屏循环回绕。
 export function buildReadingChunks(text, chapters, maxChunkChars = 140, minChunkChars = 28) {
   const chunks = [];
   for (let chapterIndex = 0; chapterIndex < chapters.length; chapterIndex++) {
@@ -408,7 +508,17 @@ export class TtsController {
     this.chunkIndex = -1;
     this.sessionToken = 0;
 
-    this.cache = new Map();
+    // 原始段级 MP3 字节缓存：chunkIndex -> { bytes, promise }（提前缓存 8 段，切换零等待）
+    this.rawCache = new Map();
+    this.prefetchQueue = [];
+    this.activePrefetches = 0;
+
+    // 当前正在播放的「无缝拼轨」信息：{ startIndex, endIndex, timeline, totalSec, blobUrl }
+    this.track = null;
+    this.nextTrackPromise = null;
+    this.nextTrackStartIndex = -1;
+    this.nextTrackReady = null;
+
     this.audio = document.createElement('audio');
     this.audio.preload = 'auto';
     this.audio.setAttribute('playsinline', '');
@@ -444,20 +554,38 @@ export class TtsController {
     });
 
     this.audio.addEventListener('timeupdate', () => {
-      if (!this.active || !this.playing || this.switching || this.inKeepAlive) return;
+      if (!this.active || !this.playing || this.switching || this.inKeepAlive || !this.track) return;
       const { currentTime, duration } = this.audio;
-      const endMargin = Number.isFinite(duration) ? Math.min(0.32, Math.max(0.15, duration * 0.12)) : 0.25;
-      const nearEnd = Number.isFinite(duration) && duration > 0.4 && (duration - currentTime) <= endMargin;
+
+      // 1) 在同一条拼轨内根据精确时间轴实时推进段落高亮与进度（0ms 音频中断！）
+      const entry = this.#timelineEntryAt(currentTime);
+      if (entry && entry.chunkIndex !== this.chunkIndex) {
+        this.chunkIndex = entry.chunkIndex;
+        const chunk = this.chunks[this.chunkIndex];
+        if (chunk) {
+          this.cb.onChunkChange?.(chunk);
+          this.cb.onHighlight?.(chunk);
+          this.#syncMediaSession();
+          this.#emitState();
+        }
+        // 持续补充提前缓存池并提前拼好下一轨
+        this.#schedulePrefetch(this.chunkIndex);
+      }
+
+      // 2) 接近本轨末尾或锁屏回绕时无缝切换至已拼好的下一轨
+      const effectiveDur = Number.isFinite(duration) && duration > 0 ? duration : this.track.totalSec;
+      const endMargin = Math.min(0.32, Math.max(0.15, effectiveDur * 0.08));
+      const nearEnd = effectiveDur > 0.4 && (effectiveDur - currentTime) <= endMargin;
       const wrapped = this.lastTime > 0.45 && currentTime < this.lastTime - 0.3;
       this.lastTime = currentTime;
       if (nearEnd || wrapped) {
-        this.#advanceChunk(1, { auto: true });
+        this.#advanceToNextTrack({ auto: true });
       }
     });
 
     this.audio.addEventListener('ended', () => {
       if (!this.active || !this.playing || this.switching || this.inKeepAlive) return;
-      this.#advanceChunk(1, { auto: true });
+      this.#advanceToNextTrack({ auto: true });
     });
 
     this.audio.addEventListener('error', () => {
@@ -467,6 +595,15 @@ export class TtsController {
       this.#emitState();
       this.cb.onToast?.('音频播放失败，请检查网络或听书设置。');
     });
+  }
+
+  #timelineEntryAt(sec) {
+    const tl = this.track?.timeline;
+    if (!tl?.length) return null;
+    for (let i = tl.length - 1; i >= 0; i--) {
+      if (sec >= tl[i].startSec - 0.05) return tl[i];
+    }
+    return tl[0];
   }
 
   #ensureSilentWav() {
@@ -499,17 +636,17 @@ export class TtsController {
       prevWebVoice !== this.settings.webVoice;
 
     if (sourceChanged) {
-      this.#clearCache();
+      this.#clearAllCaches();
       if (this.active && this.chunkIndex >= 0) {
         const shouldResume = this.playing || this.loading;
         this.#stopCurrentPlayback();
-        if (shouldResume) this.#playChunk(this.chunkIndex, { fromUser: true });
+        if (shouldResume) this.#playFromChunk(this.chunkIndex, { fromUser: true, fastStart: true });
       }
     } else if (this.active) {
       if (this.settings.engine === 'api') {
         this.#applyPlaybackRate();
       } else if (this.playing) {
-        this.#playChunk(this.chunkIndex, { fromUser: true });
+        this.#playFromChunk(this.chunkIndex, { fromUser: true, fastStart: true });
       }
     }
     this.#emitState();
@@ -552,13 +689,17 @@ export class TtsController {
     return this.chunks[this.chunkIndex] ?? null;
   }
 
+  // 返回当前段落内部的相对秒数（即使处于多段拼轨中也能精准扣除前面段时长）
   getCurrentAudioTime() {
-    if (this.settings.engine !== 'api' || this.inKeepAlive) return 0;
+    if (this.settings.engine !== 'api' || this.inKeepAlive || !this.track) return 0;
     const t = this.audio.currentTime;
-    const d = this.audio.duration;
-    if (!Number.isFinite(t) || t < 0.5) return 0;
-    if (Number.isFinite(d) && d - t < 1.0) return 0;
-    return Math.round(t * 10) / 10;
+    if (!Number.isFinite(t)) return 0;
+    const entry = this.track.timeline.find(item => item.chunkIndex === this.chunkIndex);
+    if (!entry) return 0;
+    const rel = t - entry.startSec;
+    const segDur = entry.endSec - entry.startSec;
+    if (rel < 0.5 || segDur - rel < 1.0) return 0;
+    return Math.round(rel * 10) / 10;
   }
 
   async start(bookId, bookTitle, text, chapters, startOffset, resumeAudioTime = 0) {
@@ -575,7 +716,7 @@ export class TtsController {
       return;
     }
 
-    this.#clearCache();
+    this.#clearAllCaches();
     this.active = true;
     const index = findChunkIndexAt(this.chunks, startOffset);
     this.chunkIndex = Math.max(0, index);
@@ -584,7 +725,8 @@ export class TtsController {
       this.#primeAudioElement();
     }
     this.#requestWakeLock();
-    await this.#playChunk(this.chunkIndex, { fromUser: true, resumeTime: resumeAudioTime });
+    // 首次起播用 fastStart=true（先秒开当前 1 段，同时后台立刻预缓存并拼好后续 6 段大轨）
+    await this.#playFromChunk(this.chunkIndex, { fromUser: true, resumeTime: resumeAudioTime, fastStart: true });
   }
 
   #primeAudioElement() {
@@ -615,13 +757,13 @@ export class TtsController {
           this.#emitState();
           return;
         } catch {
-          // 失败时重新加载当前块
+          // 失败时重播当前段
         }
       }
       this.#primeAudioElement();
-      await this.#playChunk(Math.max(0, this.chunkIndex), { fromUser: true });
+      await this.#playFromChunk(Math.max(0, this.chunkIndex), { fromUser: true, fastStart: true });
     } else {
-      await this.#playChunk(Math.max(0, this.chunkIndex), { fromUser: true });
+      await this.#playFromChunk(Math.max(0, this.chunkIndex), { fromUser: true, fastStart: true });
     }
   }
 
@@ -656,7 +798,7 @@ export class TtsController {
     this.inKeepAlive = false;
     this.setSleepMode('off');
     this.#stopCurrentPlayback();
-    this.#clearCache();
+    this.#clearAllCaches();
     this.#releaseWakeLock();
     this.chunks = [];
     this.chunkIndex = -1;
@@ -683,55 +825,155 @@ export class TtsController {
     const target = findChunkIndexAt(this.chunks, offset);
     if (target < 0) return;
     if (target === this.chunkIndex && (this.playing || this.loading)) return;
-    const shouldPlay = this.playing || this.loading;
-    this.chunkIndex = target;
+    await this.#jumpToChunk(target, this.playing || this.loading);
+  }
+
+  async stepChunk(delta) {
+    if (!this.active || !this.chunks.length) return;
+    const target = this.chunkIndex + delta;
+    if (target < 0) {
+      this.cb.onToast?.('已经是第一段。');
+      return;
+    }
+    if (target >= this.chunks.length) {
+      this.pause();
+      this.cb.onBookEnd?.();
+      return;
+    }
+    await this.#jumpToChunk(target, true);
+  }
+
+  async #jumpToChunk(targetIndex, shouldPlay) {
+    // 若目标段就在当前已加载的拼轨内，直接秒跳 currentTime，零等待零重下！
+    if (this.settings.engine === 'api' && this.track && !this.inKeepAlive && !this.switching) {
+      const entry = this.track.timeline.find(item => item.chunkIndex === targetIndex);
+      if (entry && this.audio.readyState >= 1) {
+        this.chunkIndex = targetIndex;
+        this.audio.currentTime = entry.startSec;
+        this.lastTime = entry.startSec;
+        const chunk = this.chunks[targetIndex];
+        this.cb.onChunkChange?.(chunk);
+        this.cb.onHighlight?.(chunk);
+        if (shouldPlay && this.audio.paused) {
+          this.#applyPlaybackRate();
+          await this.audio.play().catch(() => {});
+        }
+        this.#syncMediaSession();
+        this.#emitState();
+        this.#schedulePrefetch(targetIndex);
+        return;
+      }
+    }
+
+    this.chunkIndex = targetIndex;
     if (shouldPlay) {
-      await this.#playChunk(target, { fromUser: true });
+      await this.#playFromChunk(targetIndex, { fromUser: true, fastStart: true });
     } else {
-      const chunk = this.chunks[target];
+      const chunk = this.chunks[targetIndex];
       this.cb.onHighlight?.(chunk);
       this.#emitState();
     }
   }
 
-  async stepChunk(delta) {
-    if (!this.active || !this.chunks.length) return;
-    await this.#advanceChunk(delta, { auto: false });
-  }
+  async #advanceToNextTrack({ auto }) {
+    const prevEndIndex = this.track ? this.track.endIndex : this.chunkIndex;
+    const prevChunk = this.chunks[prevEndIndex];
+    const nextStart = prevEndIndex + 1;
 
-  async #advanceChunk(delta, { auto }) {
-    const prev = this.chunks[this.chunkIndex];
-    const nextIndex = this.chunkIndex + delta;
-
-    if (nextIndex < 0) {
-      this.cb.onToast?.('已经是第一段。');
-      return;
-    }
-    if (nextIndex >= this.chunks.length) {
+    if (nextStart >= this.chunks.length) {
       this.pause();
       this.cb.onBookEnd?.();
       return;
     }
 
-    const next = this.chunks[nextIndex];
-    if (auto && this.sleepMode === 'chapter' && prev && next.chapterIndex !== prev.chapterIndex) {
-      this.chunkIndex = nextIndex;
+    const nextChunk = this.chunks[nextStart];
+    if (auto && this.sleepMode === 'chapter' && prevChunk && nextChunk.chapterIndex !== prevChunk.chapterIndex) {
+      this.chunkIndex = nextStart;
       this.setSleepMode('off');
       this.pause();
-      this.cb.onChunkChange?.(next);
+      this.cb.onChunkChange?.(nextChunk);
       this.cb.onToast?.('本章已听完，已按定时暂停。');
       return;
     }
 
-    await this.#playChunk(nextIndex, { fromUser: !auto });
+    await this.#playFromChunk(nextStart, { fromUser: !auto, fastStart: false });
   }
 
-  async #playChunk(index, { fromUser = false, resumeTime = 0 } = {}) {
-    const chunk = this.chunks[index];
+  // 计算从 startIndex 开始可以拼进同一条连续 MP3 轨的段落区间（不跨章，最多 6 段 ≈ 1.5~2.5 分钟）
+  #computeTrackSpan(startIndex, fastStart) {
+    if (fastStart) {
+      // 若后续已有提前缓存好的段，一并拼上；否则先秒播当前 1 段实现 0.4s 起播
+      let end = startIndex;
+      const chap = this.chunks[startIndex].chapterIndex;
+      while (
+        end + 1 < this.chunks.length &&
+        end - startIndex + 1 < 6 &&
+        this.chunks[end + 1].chapterIndex === chap &&
+        this.rawCache.get(end + 1)?.bytes
+      ) {
+        end++;
+      }
+      return { start: startIndex, end };
+    }
+
+    const chap = this.chunks[startIndex].chapterIndex;
+    let end = startIndex;
+    let charBudget = this.chunks[startIndex].text.length;
+    while (
+      end + 1 < this.chunks.length &&
+      end - startIndex + 1 < 6 &&
+      charBudget + this.chunks[end + 1].text.length <= 750 &&
+      this.chunks[end + 1].chapterIndex === chap
+    ) {
+      end++;
+      charBudget += this.chunks[end].text.length;
+    }
+    return { start: startIndex, end };
+  }
+
+  async #buildTrack(startIndex, endIndex) {
+    const items = [];
+    for (let i = startIndex; i <= endIndex; i++) {
+      const bytes = await this.#ensureChunkBytes(i);
+      items.push({ chunkIndex: i, bytes });
+    }
+    const { bytes, timeline, totalSec } = stitchMp3Segments(items);
+    const blobUrl = URL.createObjectURL(new Blob([bytes], { type: 'audio/mpeg' }));
+    return { startIndex, endIndex, timeline, totalSec, blobUrl };
+  }
+
+  #prepareNextTrack(afterEndIndex) {
+    const nextStart = afterEndIndex + 1;
+    if (nextStart >= this.chunks.length) return;
+    if (this.nextTrackStartIndex === nextStart && (this.nextTrackReady || this.nextTrackPromise)) return;
+
+    this.#revokeNextTrack();
+    this.nextTrackStartIndex = nextStart;
+    const { start, end } = this.#computeTrackSpan(nextStart, false);
+    this.nextTrackPromise = this.#buildTrack(start, end)
+      .then(built => {
+        if (this.nextTrackStartIndex === nextStart && this.active) {
+          this.nextTrackReady = built;
+          return built;
+        }
+        URL.revokeObjectURL(built.blobUrl);
+        return null;
+      })
+      .catch(() => {
+        if (this.nextTrackStartIndex === nextStart) {
+          this.nextTrackStartIndex = -1;
+          this.nextTrackPromise = null;
+        }
+        return null;
+      });
+  }
+
+  async #playFromChunk(startIndex, { fromUser = false, resumeTime = 0, fastStart = false } = {}) {
+    const chunk = this.chunks[startIndex];
     if (!chunk || !this.active) return;
 
     const token = ++this.sessionToken;
-    this.chunkIndex = index;
+    this.chunkIndex = startIndex;
     this.lastTime = 0;
     this.cb.onChunkChange?.(chunk);
     this.cb.onHighlight?.(chunk);
@@ -745,20 +987,51 @@ export class TtsController {
     this.loading = true;
     this.#emitState();
 
-    const cached = this.cache.get(index);
-    if (!cached?.blobUrl) {
+    // 立刻启动后台 8 段预缓存，绝不干等
+    this.#schedulePrefetch(startIndex);
+
+    // 优先直接拿已经提前拼好的下一轨（0ms 网络等待！）
+    let builtTrack = null;
+    if (this.nextTrackStartIndex === startIndex && this.nextTrackReady) {
+      builtTrack = this.nextTrackReady;
+      this.nextTrackReady = null;
+      this.nextTrackPromise = null;
+      this.nextTrackStartIndex = -1;
+    } else if (this.nextTrackStartIndex === startIndex && this.nextTrackPromise) {
       this.#enterSilentKeepAlive();
+      builtTrack = await this.nextTrackPromise;
+      this.nextTrackReady = null;
+      this.nextTrackPromise = null;
+      this.nextTrackStartIndex = -1;
     }
 
     try {
-      const blobUrl = await this.#ensureChunkAudio(index);
-      if (token !== this.sessionToken || !this.active) return;
+      if (!builtTrack) {
+        const { start, end } = this.#computeTrackSpan(startIndex, fastStart);
+        // 若所需段不全在缓存中，切静音保活防 iOS 锁屏断流
+        let allReady = true;
+        for (let i = start; i <= end; i++) {
+          if (!this.rawCache.get(i)?.bytes) { allReady = false; break; }
+        }
+        if (!allReady) this.#enterSilentKeepAlive();
+        builtTrack = await this.#buildTrack(start, end);
+      }
 
+      if (token !== this.sessionToken || !this.active) {
+        if (builtTrack?.blobUrl) URL.revokeObjectURL(builtTrack.blobUrl);
+        return;
+      }
+
+      const prevUrl = this.track?.blobUrl;
+      this.track = builtTrack;
       this.inKeepAlive = false;
       this.audio.loop = true;
-      this.audio.src = blobUrl;
+      this.audio.src = builtTrack.blobUrl;
       this.#applyPlaybackRate();
       this.lastTime = 0;
+      if (prevUrl && prevUrl !== builtTrack.blobUrl) {
+        setTimeout(() => URL.revokeObjectURL(prevUrl), 5000);
+      }
 
       if (resumeTime > 0.5) {
         const applySeek = () => {
@@ -781,8 +1054,10 @@ export class TtsController {
       this.#syncMediaSession();
       this.#emitState();
 
-      this.#prefetchAhead(index);
-      this.#pruneCache(index);
+      // 立刻开始提前缓存并预拼下一整条 6 段连续音轨
+      this.#schedulePrefetch(builtTrack.endIndex);
+      this.#prepareNextTrack(builtTrack.endIndex);
+      this.#pruneRawCache(startIndex);
     } catch (err) {
       if (token !== this.sessionToken || !this.active) return;
       this.switching = false;
@@ -797,8 +1072,8 @@ export class TtsController {
         return;
       }
       const hint = !this.settings.apiUrl?.trim()
-        ? '未检测到同源 TTS 服务，请点「设置」检查接口，或切换浏览器原生朗读。'
-        : `语音合成失败（${err?.message || '网络异常'}），可在「设置」测试接口或切换原生朗读。`;
+        ? '未检测到同源 TTS 服务，请点「音色」检查接口，或切换离线原生朗读。'
+        : `语音合成失败（${err?.message || '网络异常'}），可在「音色」测试接口或切换离线朗读。`;
       this.cb.onToast?.(hint);
       if (fromUser) this.cb.onNeedConfig?.();
     }
@@ -816,8 +1091,8 @@ export class TtsController {
     }
   }
 
-  #ensureChunkAudio(index) {
-    const existing = this.cache.get(index);
+  #ensureChunkBytes(index) {
+    const existing = this.rawCache.get(index);
     if (existing) return existing.promise;
 
     const chunk = this.chunks[index];
@@ -825,7 +1100,7 @@ export class TtsController {
     const headers = { 'Content-Type': 'application/json' };
     if (this.settings.apiKey?.trim()) headers.Authorization = `Bearer ${this.settings.apiKey.trim()}`;
 
-    const entry = { blobUrl: null, promise: null };
+    const entry = { bytes: null, promise: null };
     entry.promise = (async () => {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 35000);
@@ -840,47 +1115,70 @@ export class TtsController {
           const detail = await response.text().catch(() => '');
           throw new Error(`HTTP ${response.status}${detail ? ` ${detail.slice(0, 60)}` : ''}`);
         }
-        const blob = await response.blob();
-        if (!blob.size) throw new Error('返回音频为空');
-        const blobUrl = URL.createObjectURL(blob);
-        entry.blobUrl = blobUrl;
-        return blobUrl;
+        const buf = await response.arrayBuffer();
+        if (!buf.byteLength) throw new Error('返回音频为空');
+        const bytes = new Uint8Array(buf);
+        entry.bytes = bytes;
+        return bytes;
       } catch (err) {
-        if (this.cache.get(index) === entry) this.cache.delete(index);
+        if (this.rawCache.get(index) === entry) this.rawCache.delete(index);
         throw err;
       } finally {
         clearTimeout(timer);
       }
     })();
 
-    this.cache.set(index, entry);
+    this.rawCache.set(index, entry);
     return entry.promise;
   }
 
-  #prefetchAhead(currentIndex) {
-    // 提前预加载后 4 个自然段（约 40~90 秒音频），单段切换零卡顿、锁屏更稳
-    for (let offset = 1; offset <= 4; offset++) {
-      const target = currentIndex + offset;
-      if (target < this.chunks.length && !this.cache.has(target)) {
-        this.#ensureChunkAudio(target).catch(() => {});
+  // 受控并发（最多 2 路）持续提前缓存后面 8 个自然段，不抢占当前段带宽
+  #schedulePrefetch(anchorIndex) {
+    if (this.settings.engine !== 'api' || !this.active) return;
+    for (let offset = 1; offset <= 8; offset++) {
+      const target = anchorIndex + offset;
+      if (target < this.chunks.length && !this.rawCache.has(target) && !this.prefetchQueue.includes(target)) {
+        this.prefetchQueue.push(target);
+      }
+    }
+    this.#drainPrefetchQueue();
+  }
+
+  #drainPrefetchQueue() {
+    while (this.active && this.activePrefetches < 2 && this.prefetchQueue.length > 0) {
+      const target = this.prefetchQueue.shift();
+      if (this.rawCache.has(target) || target < this.chunkIndex) continue;
+      this.activePrefetches++;
+      this.#ensureChunkBytes(target)
+        .catch(() => {})
+        .finally(() => {
+          this.activePrefetches--;
+          this.#drainPrefetchQueue();
+        });
+    }
+  }
+
+  #pruneRawCache(currentIndex) {
+    for (const key of this.rawCache.keys()) {
+      if (key < currentIndex - 3 || key > currentIndex + 16) {
+        this.rawCache.delete(key);
       }
     }
   }
 
-  #pruneCache(currentIndex) {
-    for (const [key, entry] of this.cache.entries()) {
-      if (key < currentIndex - 1 || key > currentIndex + 5) {
-        if (entry.blobUrl) URL.revokeObjectURL(entry.blobUrl);
-        this.cache.delete(key);
-      }
-    }
+  #revokeNextTrack() {
+    if (this.nextTrackReady?.blobUrl) URL.revokeObjectURL(this.nextTrackReady.blobUrl);
+    this.nextTrackReady = null;
+    this.nextTrackPromise = null;
+    this.nextTrackStartIndex = -1;
   }
 
-  #clearCache() {
-    for (const entry of this.cache.values()) {
-      if (entry.blobUrl) URL.revokeObjectURL(entry.blobUrl);
-    }
-    this.cache.clear();
+  #clearAllCaches() {
+    this.prefetchQueue = [];
+    this.rawCache.clear();
+    if (this.track?.blobUrl) URL.revokeObjectURL(this.track.blobUrl);
+    this.track = null;
+    this.#revokeNextTrack();
   }
 
   #playWithWebSpeech(chunk, token) {
@@ -912,7 +1210,21 @@ export class TtsController {
     };
     utterance.onend = () => {
       if (token !== this.sessionToken || !this.active || !this.playing) return;
-      this.#advanceChunk(1, { auto: true });
+      const next = this.chunkIndex + 1;
+      if (next >= this.chunks.length) {
+        this.pause();
+        this.cb.onBookEnd?.();
+        return;
+      }
+      if (this.sleepMode === 'chapter' && this.chunks[next].chapterIndex !== chunk.chapterIndex) {
+        this.chunkIndex = next;
+        this.setSleepMode('off');
+        this.pause();
+        this.cb.onChunkChange?.(this.chunks[next]);
+        this.cb.onToast?.('本章已听完，已按定时暂停。');
+        return;
+      }
+      this.#playFromChunk(next, { fromUser: false });
     };
     utterance.onerror = event => {
       if (token !== this.sessionToken || !this.active) return;
