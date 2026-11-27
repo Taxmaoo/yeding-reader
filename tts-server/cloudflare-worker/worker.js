@@ -1040,6 +1040,7 @@ async function loadCatalog(bookId) {
         title: String(chapter.title || '').trim(),
         volume: String(chapter.volume_name || '').trim(),
         locked: Boolean(chapter.isChapterLock || Number(chapter.needPay) > 0),
+        order: Number(chapter.realChapterOrder) || undefined,
       });
       if (chapter.volume_name && !volumes.includes(chapter.volume_name)) volumes.push(chapter.volume_name);
     }
@@ -1050,8 +1051,13 @@ async function loadCatalog(bookId) {
     title: titles.get(id)?.title || `第${index + 1}章`,
     volume: titles.get(id)?.volume || '',
     locked: titles.get(id)?.locked || false,
+    order: titles.get(id)?.order ?? index + 1,
   }));
-  return { chapters, volumes };
+  // allItemIds 的顺序并不总是阅读顺序；realChapterOrder 才是权威章序
+  const ordered = chapters.every(chapter => Number.isFinite(chapter.order))
+    ? chapters.slice().sort((a, b) => a.order - b.order)
+    : chapters;
+  return { chapters: ordered, volumes };
 }
 
 async function loadBookDetail(bookId, { cookie = '' } = {}) {
