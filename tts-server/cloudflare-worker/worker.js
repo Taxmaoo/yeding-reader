@@ -993,6 +993,23 @@ async function fetchChapters(bookId, itemIds, { cookie = '', fresh = false } = {
     }
     await sleep(220);
   }
+
+  // 还有空章：多半是这台设备被短时限流，换一台设备再补一次
+  const left = rows.filter(isEmptyish);
+  if (left.length) {
+    rotateDevice();
+    try {
+      const retryKey = await getV1Key(true);
+      const retryRows = await fetchBatch(bookId, left.map(row => row.id), retryKey, cookie);
+      for (const retryRow of retryRows) {
+        if (!retryRow?.ok) continue;
+        const index = rows.findIndex(item => item.id === retryRow.id);
+        if (index >= 0) rows[index] = retryRow;
+      }
+    } catch {
+      // 换设备也失败就返回现状，客户端会做延迟补漏
+    }
+  }
   return rows;
 }
 
