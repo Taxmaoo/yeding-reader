@@ -1,21 +1,21 @@
-import { DEFAULT_SETTINGS, SAMPLE, decodeTxt, indexText, sectionAt, progressAt, isLowSurrogate } from './reader-core.mjs?v=37';
+import { DEFAULT_SETTINGS, SAMPLE, decodeTxt, indexText, sectionAt, progressAt, isLowSurrogate } from './reader-core.mjs?v=38';
 import {
   listBooks, readText, saveBook, addBook, putBook, deleteBook,
   saveMetaMirror, requestPersistentStorage,
-} from './storage.mjs?v=37';
+} from './storage.mjs?v=38';
 import {
   TtsController, EDGE_VOICES, SLEEP_OPTIONS,
   testTtsEndpoint, resolveApiEndpoint, loadLastListened, saveLastListened,
-} from './tts.mjs?v=37';
+} from './tts.mjs?v=38';
 import {
   generateSyncKey, validateSyncKey, loadSyncKey, saveSyncKey, loadLastSyncTime,
   markLocalDeleted, clearLocalDeleted, checkCloudStatus, pushBookMeta,
   uploadBookFull, syncAllBooks, scheduleMetaSync, flushMetaSync,
   exportLibraryBackup, importLibraryBackup,
-} from './sync.mjs?v=37';
-import { setupDownload, openUpdateForBook } from './download.mjs?v=37';
+} from './sync.mjs?v=38';
+import { setupDownload, openUpdateForBook } from './download.mjs?v=38';
 
-const APP_VERSION = 'v37';
+const APP_VERSION = 'v38';
 const $ = id => document.getElementById(id);
 const viewport = $('viewport');
 const passage = $('passage');

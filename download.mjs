@@ -257,6 +257,16 @@ function mountTaskList(box) {
   }, 1500);
 }
 
+/** 打开一个带进度容器的面板再启动任务：避免进度写进已被替换掉的旧容器。 */
+function startTaskPanel(title, taskLabel) {
+  const box = element('div', null, 'dl-download');
+  openPanel(taskLabel || '下载中', element('strong', title, 'dl-title'), box, actionRow(
+    button('下载任务', () => openTasksPanel(), 'secondary'),
+    button('关闭', () => { const d = $('dialog'); if (d.open) d.close(); }, 'secondary'),
+  ));
+  return box;
+}
+
 function openTasksPanel() {
   const box = element('div', null, 'dl-tasks');
   renderTaskList(box);
@@ -450,10 +460,10 @@ function openResumePanel({ bookId, catalog, existing, seed }) {
       statusLine('《' + title + '》没有章节清单，无法只补新章。可以让它重新拉取整本并替换正文（阅读进度、书签保留）。', 'is-warn'),
       actionRow(button('重新下载整本', async () => {
         writeSetting(PACE_KEY, pace.value);
+        const box = startTaskPanel(title, '重新下载整本');
         const task = createTask({ remoteId: bookId, title, mode: 'replace', pace: pace.value, replace: true });
-            await pumpQueue(body, task.id);
-      }, 'primary'), button('取消', () => openHome(), 'secondary')),
-      body);
+        await pumpQueue(box, task.id);
+      }, 'primary'), button('取消', () => openHome(), 'secondary')));
     return;
   }
 
@@ -471,7 +481,8 @@ function openResumePanel({ bookId, catalog, existing, seed }) {
     if (prevPos && pos !== prevPos + 1) jumps += 1;
     prevPos = pos;
   });
-  const broken = drift > 0 || jumps > 0;
+  const allUnknown = manifest.length > 0 && unknown === manifest.length;
+  const broken = drift > 0 || jumps > 0 || allUnknown;
 
   const uptoDate = missing.length === 0 && failed.length === 0 && !broken;
   const start = button(
@@ -485,8 +496,9 @@ function openResumePanel({ bookId, catalog, existing, seed }) {
           statusLine('建议点「重新下载整本」：会按目录顺序重抓正文，阅读进度和书签保留。'),
           actionRow(button('重新下载整本', async () => {
             writeSetting(PACE_KEY, pace.value);
+            const box = startTaskPanel(title, '重新下载整本');
             const fixTask = createTask({ remoteId: bookId, title, mode: 'replace', pace: pace.value, replace: true });
-            await pumpQueue(body, fixTask.id);
+            await pumpQueue(box, fixTask.id);
           }, 'primary'), button('返回', () => openResumePanel({ bookId, catalog, existing: { ...existing }, seed }), 'secondary')));
         return;
       }
@@ -508,7 +520,9 @@ function openResumePanel({ bookId, catalog, existing, seed }) {
       + (uptoDate ? ' · 已经是最新' : ''),
     uptoDate ? 'is-ok' : ''),
     broken
-      ? statusLine(`⚠ 检测到章序异常 ${drift || jumps} 处${unknown ? `（另有 ${unknown} 章已不在目录里）` : ''}：正文第 N 条不是目录第 N 章，继续增量补只会更乱，请先「重新下载整本」。`, 'is-warn')
+      ? statusLine(allUnknown
+        ? `⚠ 这本书的章节清单与当前目录完全对不上（${unknown} 章全部失效），大概率是旧版本留下的残档。请点「重新下载整本」按目录顺序重抓。`
+        : `⚠ 检测到章序异常 ${drift || jumps} 处${unknown ? `（另有 ${unknown} 章已不在目录里）` : ''}：正文第 N 条不是目录第 N 章，继续增量补只会更乱，请先「重新下载整本」。`, 'is-warn')
       : null,
     paceRow,
     actionRow(start, button('下载任务', () => openTasksPanel(), 'secondary'), button('重新下载整本', () => {
@@ -516,8 +530,9 @@ function openResumePanel({ bookId, catalog, existing, seed }) {
         statusLine('会用番茄上的最新内容替换这本书的正文，阅读进度和书签保留。', 'is-warn'),
         actionRow(button('确认替换', async () => {
           writeSetting(PACE_KEY, pace.value);
+          const box = startTaskPanel(title, '重新下载整本');
           const task = createTask({ remoteId: bookId, title, mode: 'replace', pace: pace.value, replace: true });
-                await pumpQueue(body, task.id);
+          await pumpQueue(box, task.id);
         }, 'primary'), button('取消', () => openHome(), 'secondary')));
     }, 'secondary')),
     body);
