@@ -1,9 +1,9 @@
-import { DEFAULT_SETTINGS, SAMPLE, decodeTxt, indexText, sectionAt, progressAt, isLowSurrogate } from './reader-core.mjs?v=14';
-import { listBooks, readText, saveBook, addBook, deleteBook } from './storage.mjs?v=14';
+import { DEFAULT_SETTINGS, SAMPLE, decodeTxt, indexText, sectionAt, progressAt, isLowSurrogate } from './reader-core.mjs?v=15';
+import { listBooks, readText, saveBook, addBook, deleteBook } from './storage.mjs?v=15';
 import {
   TtsController, EDGE_VOICES, SLEEP_OPTIONS,
   testTtsEndpoint, resolveApiEndpoint, loadLastListened, saveLastListened,
-} from './tts.mjs?v=14';
+} from './tts.mjs?v=15';
 
 const $ = id => document.getElementById(id);
 const viewport = $('viewport');
@@ -194,6 +194,7 @@ function renderShelf() {
 }
 
 function openDialog(title, ...content) {
+  dialog.classList.remove('toc-sheet');
   $('dialogTitle').textContent = title;
   $('dialogBody').replaceChildren(...content);
   $('dialogBody').scrollTop = 0;
@@ -483,15 +484,78 @@ function completeChapterIfSeenToEnd() {
   if (active && isChapterEndVisible()) recordChapterProgress(true);
 }
 
+function effectiveCurrentChapterIndex() {
+  if (!active) return 0;
+  if (tts.active && tts.bookId === active.book.id) {
+    const chunk = tts.getCurrentChunk();
+    if (chunk) {
+      let lo = 0;
+      let hi = active.chapters.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (active.chapters[mid].start <= chunk.start) lo = mid;
+        else hi = mid - 1;
+      }
+      return lo;
+    }
+  }
+  return currentChapterIndex();
+}
+
+function chapterWordCount(index) {
+  const start = active.chapters[index].start;
+  const end = active.chapters[index + 1]?.start ?? active.text.length;
+  return Math.max(1, end - start);
+}
+
+function liveChapterPercent(index, isCurrent) {
+  const saved = active.book.chapterProgress?.[index] || 0;
+  if (!isCurrent) return saved;
+  const start = active.chapters[index].start;
+  const end = active.chapters[index + 1]?.start ?? active.text.length;
+  const pos = (tts.active && tts.bookId === active.book.id && tts.getCurrentChunk())
+    ? tts.getCurrentChunk().start
+    : active.book.position;
+  const live = progressAt(Math.max(0, pos - start), Math.max(1, end - start), active.book.finished && index === active.chapters.length - 1);
+  return Math.max(1, live, saved);
+}
+
 function updateChapterRow(row, index, currentIndex) {
-  const progress = active.book.chapterProgress?.[index] || 0;
   const isCurrent = index === currentIndex;
+  const progress = liveChapterPercent(index, isCurrent);
+  const isTtsHere = isCurrent && tts.active && tts.bookId === active.book.id;
   row.dataset.state = progress === 100 ? 'read' : progress > 0 ? 'partial' : 'unread';
   if (isCurrent) row.setAttribute('aria-current', 'location');
   else row.removeAttribute('aria-current');
-  const label = progress === 100 ? '已读' : isCurrent ? '正在读' : progress > 0 ? '读到' : '未读';
-  row.querySelector('.chapter-progress').textContent = `${label} ${progress}%`;
-  row.querySelector('.chapter-progress-fill').style.width = `${progress}%`;
+
+  const ico = row.querySelector('.toc-loc-ico');
+  if (ico) ico.hidden = !isCurrent;
+
+  const pct = row.querySelector('.toc-pct');
+  if (pct) {
+    if (isCurrent) pct.textContent = `读到${progress}%`;
+    else if (progress === 100) pct.textContent = '已读';
+    else if (progress > 0) pct.textContent = `${progress}%`;
+    else pct.textContent = '';
+  }
+
+  const meta = row.querySelector('.toc-row-meta');
+  if (meta) {
+    const words = chapterWordCount(index);
+    meta.textContent = isTtsHere
+      ? `${words}字 · 正在朗读`
+      : `${words}字 · 第${index + 1}章`;
+  }
+}
+
+function snapTocToCurrent(smooth = false) {
+  const list = $('chapterList');
+  const scroller = list?.closest('.toc-scroll');
+  const current = list?.querySelector('[aria-current="location"]');
+  if (!scroller || !current) return;
+  const targetTop = Math.max(0, current.offsetTop);
+  if (smooth && scroller.scrollTo) scroller.scrollTo({ top: targetTop, behavior: 'smooth' });
+  else scroller.scrollTop = targetTop;
 }
 
 function syncChapterUI() {
@@ -503,7 +567,11 @@ function syncChapterUI() {
   if (!dialog.open) return;
   const list = $('chapterList');
   if (!list) return;
-  for (const row of list.children) updateChapterRow(row, Number(row.dataset.chapter), index);
+  const effIdx = effectiveCurrentChapterIndex();
+  for (const row of list.children) updateChapterRow(row, Number(row.dataset.chapter), effIdx);
+  const countEl = dialog.querySelector('.toc-count-label');
+  if (countEl) countEl.textContent = `共 ${active.chapters.length} 章 · 当前第 ${effIdx + 1} 章`;
+  snapTocToCurrent(false);
 }
 
 function updateProgress() {
@@ -604,57 +672,239 @@ function setMenu(open) {
   syncOrbVisibility();
 }
 
-function toc() {
+function toc(initialTab = 'toc') {
+  if (!active) return;
   if (scrollTimer) updateScrollPosition();
-  const search = element('input', null, 'search-input');
-  search.type = 'search';
-  search.placeholder = '搜索正文';
-  search.setAttribute('aria-label', '搜索正文');
-  const results = element('div');
-  const chapterList = element('div');
-  chapterList.id = 'chapterList';
+  const { book, chapters, text } = active;
+  const currentIndex = effectiveCurrentChapterIndex();
+  let reversed = false;
+  let activeTab = initialTab === 'marks' ? 'marks' : 'toc';
+
   const go = position => {
     completeChapterIfSeenToEnd();
     dialog.close();
     setMenu(false);
     jumpTo(position);
-    viewport.focus({ preventScroll: true });
+    if (tts.active && tts.bookId === book.id && listenViewOpen) {
+      tts.seekToOffset(position);
+    } else {
+      viewport.focus({ preventScroll: true });
+    }
   };
-  const currentIndex = currentChapterIndex();
-  chapterList.append(...active.chapters.map(({ title, start }, index) => {
-    const row = element('button', null, 'chapter-row');
-    row.type = 'button';
-    row.dataset.chapter = index;
-    row.onclick = () => go(start);
-    const name = element('span', title, 'chapter-name');
-    const percent = element('span', null, 'chapter-progress');
-    const progress = element('span', null, 'chapter-progress-bar');
-    progress.setAttribute('aria-hidden', 'true');
-    progress.append(element('span', null, 'chapter-progress-fill'));
-    row.append(name, percent, progress);
-    updateChapterRow(row, index, currentIndex);
-    return row;
-  }));
+
+  // 顶部书籍头卡（番茄同款：封面 + 书名 + 字数 + 搜全文 + 关闭）
+  const head = element('div', null, 'toc-head');
+  const tone = Math.max(0, books.indexOf(book)) % 6;
+  const cover = element('div', Array.from(book.title)[0] || '书', 'toc-cover');
+  cover.dataset.tone = String(tone);
+
+  const info = element('div', null, 'toc-head-info');
+  const totalWords = text.length >= 10000
+    ? `${(text.length / 10000).toFixed(1)}万字`
+    : `${text.length}字`;
+  const bookPct = progressAt(book.position, book.length, book.finished);
+  info.append(
+    element('strong', book.title, 'toc-book-title'),
+    element('span', `${totalWords} · 已读 ${bookPct}%`, 'toc-book-sub'),
+  );
+
+  const searchToggle = element('button', null, 'toc-search-pill');
+  searchToggle.type = 'button';
+  searchToggle.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg><span>搜全文</span>';
+
+  const closeBtn = button('×', () => dialog.close(), 'toc-close-btn');
+  closeBtn.setAttribute('aria-label', '关闭目录');
+
+  head.append(cover, info, searchToggle, closeBtn);
+
+  // 搜索输入框（点「搜全文」展开，支持同时搜章节名与正文）
+  const searchWrap = element('div', null, 'toc-search-wrap');
+  searchWrap.hidden = true;
+  const search = element('input', null, 'search-input');
+  search.type = 'search';
+  search.placeholder = '输入章节名或正文关键词…';
+  search.setAttribute('aria-label', '搜索目录与正文');
+  searchWrap.append(search);
+
+  // 标签栏：目录 / 书签
+  const tabs = element('div', null, 'toc-tabs');
+  tabs.setAttribute('role', 'tablist');
+  const tabToc = element('button', '目录', 'toc-tab');
+  tabToc.type = 'button';
+  tabToc.setAttribute('role', 'tab');
+  const tabMarks = element('button', book.marks.length ? `书签 ${book.marks.length}` : '书签', 'toc-tab');
+  tabMarks.type = 'button';
+  tabMarks.setAttribute('role', 'tab');
+  tabs.append(tabToc, tabMarks);
+
+  // 副工具条：共 N 章 · 当前第 X 章 | 定位 | 倒序
+  const subbar = element('div', null, 'toc-subbar');
+  const countLabel = element('span', `共 ${chapters.length} 章 · 当前第 ${currentIndex + 1} 章`, 'toc-count-label');
+  const subActions = element('div', null, 'toc-sub-actions');
+  const locateBtn = button('定位', () => snapTocToCurrent(true), 'toc-sub-btn');
+  const sortBtn = button('倒序', () => {
+    reversed = !reversed;
+    sortBtn.textContent = reversed ? '正序' : '倒序';
+    renderChapterRows();
+    requestAnimationFrame(() => snapTocToCurrent(false));
+  }, 'toc-sub-btn');
+  subActions.append(locateBtn, sortBtn);
+  subbar.append(countLabel, subActions);
+
+  // 独立滚动容器（保证头部与工具条吸顶，当前章可精准顶到第一行）
+  const scrollWrap = element('div', null, 'toc-scroll');
+  const results = element('div', null, 'toc-search-results');
+  results.hidden = true;
+  const chapterList = element('div', null, 'toc-list');
+  chapterList.id = 'chapterList';
+  const marksPane = element('div', null, 'toc-marks-pane');
+  marksPane.hidden = true;
+
+  const LOC_SVG = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="5"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/></svg>';
+
+  function renderChapterRows() {
+    const effIdx = effectiveCurrentChapterIndex();
+    countLabel.textContent = `共 ${chapters.length} 章 · 当前第 ${effIdx + 1} 章`;
+    const frag = document.createDocumentFragment();
+    const order = reversed
+      ? chapters.map((ch, i) => [ch, i]).reverse()
+      : chapters.map((ch, i) => [ch, i]);
+
+    for (const [{ title, start }, index] of order) {
+      const row = element('button', null, 'toc-row');
+      row.type = 'button';
+      row.dataset.chapter = String(index);
+      row.onclick = () => go(start);
+
+      const top = element('div', null, 'toc-row-top');
+      const left = element('div', null, 'toc-row-left');
+      const ico = element('span', null, 'toc-loc-ico');
+      ico.innerHTML = LOC_SVG;
+      const name = element('span', title, 'toc-row-title');
+      left.append(ico, name);
+      const pct = element('span', '', 'toc-pct');
+      top.append(left, pct);
+
+      const meta = element('div', '', 'toc-row-meta');
+      row.append(top, meta);
+      updateChapterRow(row, index, effIdx);
+      frag.append(row);
+    }
+    chapterList.replaceChildren(frag);
+  }
+
+  function renderMarksPane() {
+    marksPane.replaceChildren();
+    const addBtn = button('＋ 添加当前位置为书签', () => {
+      addMark();
+      tabMarks.textContent = book.marks.length ? `书签 ${book.marks.length}` : '书签';
+      renderMarksPane();
+    }, 'toc-add-mark');
+    marksPane.append(addBtn);
+    if (!book.marks.length) {
+      marksPane.append(element('p', '还没有书签，阅读时可随时点右上角「书签＋」收藏。', 'toc-empty-note'));
+      return;
+    }
+    for (const mark of book.marks) {
+      const row = element('div', null, 'dialog-row');
+      const remove = button('×', () => {
+        book.marks = book.marks.filter(item => item !== mark);
+        store(book);
+        tabMarks.textContent = book.marks.length ? `书签 ${book.marks.length}` : '书签';
+        renderMarksPane();
+      }, 'icon-button');
+      remove.setAttribute('aria-label', `删除书签 ${mark.label}`);
+      row.append(button(`${mark.label} · ${mark.snippet}`, () => go(mark.position)), remove);
+      marksPane.append(row);
+    }
+  }
+
+  function syncTabUI() {
+    const isToc = activeTab === 'toc';
+    tabToc.setAttribute('aria-selected', String(isToc));
+    tabMarks.setAttribute('aria-selected', String(!isToc));
+    subbar.hidden = !isToc || !results.hidden;
+    chapterList.hidden = !isToc || !results.hidden;
+    marksPane.hidden = isToc || !results.hidden;
+    if (isToc && results.hidden) requestAnimationFrame(() => snapTocToCurrent(false));
+    if (!isToc) renderMarksPane();
+  }
+
+  tabToc.onclick = () => {
+    activeTab = 'toc';
+    search.value = '';
+    results.hidden = true;
+    syncTabUI();
+  };
+  tabMarks.onclick = () => {
+    activeTab = 'marks';
+    search.value = '';
+    results.hidden = true;
+    syncTabUI();
+  };
+
+  searchToggle.onclick = () => {
+    searchWrap.hidden = !searchWrap.hidden;
+    if (!searchWrap.hidden) {
+      search.focus();
+    } else {
+      search.value = '';
+      results.hidden = true;
+      syncTabUI();
+    }
+  };
+
   search.oninput = () => {
     const query = search.value.trim();
     results.replaceChildren();
-    chapterList.hidden = Boolean(query);
-    if (!query) return;
-    const text = active.text;
+    if (!query) {
+      results.hidden = true;
+      syncTabUI();
+      return;
+    }
+    results.hidden = false;
+    subbar.hidden = true;
+    chapterList.hidden = true;
+    marksPane.hidden = true;
+
+    const lower = query.toLowerCase();
+    const matchedChapters = chapters.filter(c => c.title.toLowerCase().includes(lower)).slice(0, 20);
+    if (matchedChapters.length) {
+      results.append(element('p', `匹配章节（${matchedChapters.length}）`, 'toc-search-group'));
+      for (const ch of matchedChapters) {
+        results.append(button(ch.title, () => go(ch.start), 'dialog-item'));
+      }
+    }
+
     let pos = text.indexOf(query);
     let count = 0;
+    const bodyHits = [];
     while (pos !== -1 && count < 40) {
       const hit = pos;
-      const snippet = text.slice(Math.max(0, pos - 8), pos + query.length + 24).replace(/\s+/g, ' ');
-      results.append(button(snippet, () => go(hit), 'dialog-item'));
+      const snippet = text.slice(Math.max(0, pos - 10), pos + query.length + 28).replace(/\s+/g, ' ');
+      bodyHits.push(button(snippet, () => go(hit), 'dialog-item'));
       count++;
       pos = text.indexOf(query, pos + query.length);
     }
-    if (!count) results.append(element('p', '未找到匹配的正文。'));
-    if (pos !== -1) results.append(element('p', '显示前 40 条结果。'));
+    if (bodyHits.length) {
+      results.append(element('p', `正文结果（${count}${pos !== -1 ? '+' : ''}）`, 'toc-search-group'), ...bodyHits);
+    }
+    if (!matchedChapters.length && !bodyHits.length) {
+      results.append(element('p', '未找到匹配的章节或正文。', 'toc-empty-note'));
+    }
   };
-  openDialog('目录', ...(!active.hasHeadings ? [element('p', '未识别到常见章节标题，可搜索正文跳转。')] : []), search, results, chapterList);
-  chapterList.querySelector('[aria-current="location"]')?.scrollIntoView({ block: 'nearest' });
+
+  renderChapterRows();
+  if (!active.hasHeadings) {
+    scrollWrap.append(element('p', '未识别到常见章节标题，可点右上角「搜全文」跳转。', 'toc-empty-note'));
+  }
+  scrollWrap.append(results, chapterList, marksPane);
+
+  openDialog('目录', head, tabs, searchWrap, subbar, scrollWrap);
+  dialog.classList.add('toc-sheet');
+  syncTabUI();
+  // 双帧确保 Safari/Chrome 完成布局后，精准把当前章顶到可视列表第 1 行
+  requestAnimationFrame(() => requestAnimationFrame(() => snapTocToCurrent(false)));
 }
 
 function addMark() {
