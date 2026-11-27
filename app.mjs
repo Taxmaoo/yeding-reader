@@ -1,20 +1,21 @@
-import { DEFAULT_SETTINGS, SAMPLE, decodeTxt, indexText, sectionAt, progressAt, isLowSurrogate } from './reader-core.mjs?v=34';
+import { DEFAULT_SETTINGS, SAMPLE, decodeTxt, indexText, sectionAt, progressAt, isLowSurrogate } from './reader-core.mjs?v=35';
 import {
   listBooks, readText, saveBook, addBook, putBook, deleteBook,
   saveMetaMirror, requestPersistentStorage,
-} from './storage.mjs?v=34';
+} from './storage.mjs?v=35';
 import {
   TtsController, EDGE_VOICES, SLEEP_OPTIONS,
   testTtsEndpoint, resolveApiEndpoint, loadLastListened, saveLastListened,
-} from './tts.mjs?v=34';
+} from './tts.mjs?v=35';
 import {
   generateSyncKey, validateSyncKey, loadSyncKey, saveSyncKey, loadLastSyncTime,
   markLocalDeleted, clearLocalDeleted, checkCloudStatus, pushBookMeta,
   uploadBookFull, syncAllBooks, scheduleMetaSync, flushMetaSync,
   exportLibraryBackup, importLibraryBackup,
-} from './sync.mjs?v=34';
-import { setupDownload, openUpdateForBook } from './download.mjs?v=34';
+} from './sync.mjs?v=35';
+import { setupDownload, openUpdateForBook } from './download.mjs?v=35';
 
+const APP_VERSION = 'v35';
 const $ = id => document.getElementById(id);
 const viewport = $('viewport');
 const passage = $('passage');
@@ -981,6 +982,39 @@ function bookmarks() {
   }));
 }
 
+function versionRow() {
+  const row = element('div', null, 'dialog-actions');
+  const label = element('span', `当前版本 ${APP_VERSION}`, 'storage-note');
+  row.append(label, button('检查更新', async event => {
+    const btn = event.currentTarget;
+    btn.disabled = true;
+    btn.textContent = '检查中…';
+    try {
+      const reg = await navigator.serviceWorker?.getRegistration();
+      if (reg) await reg.update();
+      const res = await fetch('./sw.js?ts=' + Date.now(), { cache: 'no-store' });
+      const text = await res.text();
+      const remote = /VERSION = '(v\d+)'/.exec(text)?.[1] || '未知';
+      if (remote !== APP_VERSION) {
+        label.textContent = `发现新版本 ${remote}，正在刷新…`;
+        const regs = await navigator.serviceWorker?.getRegistrations() || [];
+        await Promise.all(regs.map(r => r.unregister()));
+        const keys = await caches.keys();
+        await Promise.all(keys.map(k => caches.delete(k)));
+        setTimeout(() => location.reload(true), 600);
+        return;
+      }
+      label.textContent = `当前版本 ${APP_VERSION}（已是最新）`;
+    } catch {
+      label.textContent = '检查更新失败，请检查网络';
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '检查更新';
+    }
+  }, 'secondary'));
+  return row;
+}
+
 function settings() {
   const { book } = active;
   function change(key, value) {
@@ -1025,7 +1059,8 @@ function settings() {
   openDialog('阅读设置', choices('翻页方式', 'mode', [['page', '左右翻页'], ['scroll', '上下滚动']]),
     choices('背景', 'theme', [['white', '纸白'], ['paper', '暖纸'], ['green', '护眼'], ['night', '夜间']]),
     choices('字体', 'font', [['serif', '宋体'], ['sans', '系统字体']]), range('字号', 'size', 16, 32, 1, ' px'),
-    range('行距', 'leading', 1.4, 2.4, .1, ''), range('页边距', 'margin', 14, 40, 2, ' px'));
+    range('行距', 'leading', 1.4, 2.4, .1, ''), range('页边距', 'margin', 14, 40, 2, ' px'),
+    versionRow());
 }
 
 $('importBtn').onclick = () => $('fileInput').click();
@@ -2055,11 +2090,31 @@ if ('serviceWorker' in navigator && window.isSecureContext) {
   };
   offlineStatus.textContent = '正在准备离线阅读…';
   workers.ready.then(() => { offlineStatus.textContent = '✓ 已可离线阅读'; });
-  workers.register('./sw.js').then(({ installing }) => {
-    if (!installing) return;
-    const check = () => { if (installing.state === 'redundant') unavailable(); };
-    installing.addEventListener('statechange', check);
-    check();
+  workers.register('./sw.js').then(reg => {
+    const check = () => {
+      if (reg.installing?.state === 'redundant') unavailable();
+    };
+    if (reg.installing) {
+      reg.installing.addEventListener('statechange', check);
+      check();
+    }
+    // 新版本接管后自动刷新一次，避免手机 PWA 长期停在旧缓存（首次安装不刷新）
+    const hadController = Boolean(workers.controller);
+    let reloading = false;
+    workers.addEventListener('controllerchange', () => {
+      if (!hadController || reloading) return;
+      if (document.querySelector('.dl-cancel')) {
+        toast('新版本已就绪，下载结束后刷新即可');
+        return;
+      }
+      reloading = true;
+      location.reload();
+    });
+    // 回到前台时顺带查一次更新（iOS 主屏 PWA 恢复不会自动检查）
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) reg.update().catch(() => {});
+    });
+    setInterval(() => { reg.update().catch(() => {}); }, 5 * 60 * 1000);
   }).catch(unavailable);
 } else {
   offlineStatus.textContent = '请用 HTTPS 网站地址安装并开启离线阅读。';
