@@ -52,6 +52,7 @@
     </main>
   </div>
 
+  <!-- 纯净阅读页（图 1） -->
   <section id="reader" class="reader" aria-label="小说阅读器" hidden>
     <div class="reader-heading"><span id="chapterLabel"></span><span id="bookLabel"></span></div>
     <div id="viewport" class="viewport" tabindex="0" aria-label="小说正文">
@@ -60,86 +61,106 @@
     </div>
     <footer class="reader-footer">
       <button id="menuToggle" type="button" aria-label="阅读菜单" aria-expanded="false">☰</button>
-      <div class="reader-footer-end">
-        <button id="quickListenBtn" class="quick-listen" type="button" aria-label="听书">🎧 听书</button>
-        <span id="readPercent">0%</span>
-      </div>
+      <div class="reader-footer-end"><span id="readPercent">0%</span></div>
     </footer>
-    <section id="ttsBar" class="tts-bar" aria-label="听书控制台" hidden>
-      <div class="tts-bar-top">
-        <span id="ttsStatus" class="tts-status">准备听书…</span>
-        <div class="tts-top-actions">
-          <button id="ttsCollapse" class="tts-icon-btn" type="button" aria-label="收起听书栏" title="收起听书栏">⌄</button>
-          <button id="ttsClose" class="tts-icon-btn" type="button" aria-label="退出听书" title="退出听书">×</button>
-        </div>
-      </div>
-      <div class="tts-bar-controls">
-        <button id="ttsPrev" class="tts-btn" type="button" aria-label="上一段">‹ 上段</button>
-        <button id="ttsPlay" class="tts-play" type="button" aria-label="播放或暂停">播放</button>
-        <button id="ttsNext" class="tts-btn" type="button" aria-label="下一段">下段 ›</button>
-        <button id="ttsRate" class="tts-btn" type="button" aria-label="切换语速">1.0x</button>
-        <button id="ttsSleep" class="tts-btn" type="button" aria-label="定时关闭">定时</button>
-        <button id="ttsConfig" class="tts-btn" type="button" aria-label="音色与设置">音色</button>
-      </div>
-    </section>
+
+    <!-- 点击正文呼出的简洁菜单（图 2 / 图 3） -->
     <div id="readerMenus" hidden>
-      <header class="reader-toolbar"><button id="backShelf" type="button">‹ 书架</button><span id="toolbarTitle"></span><button id="hideMenu" type="button" aria-label="关闭阅读菜单">×</button></header>
+      <header class="reader-toolbar">
+        <button id="backShelf" type="button" aria-label="返回书架">‹ 书架</button>
+        <span id="toolbarTitle"></span>
+        <div class="toolbar-right">
+          <button id="markBtn" type="button" aria-label="加书签">书签＋</button>
+          <button id="hideMenu" type="button" aria-label="关闭阅读菜单">×</button>
+        </div>
+      </header>
       <div class="reading-tools">
         <div class="jump">
-          <button id="prevChapter" class="chapter-jump" type="button" aria-label="上一章"><span aria-hidden="true">‹</span><small>上一章</small></button>
-          <div class="jump-track"><div class="jump-caption"><span id="jumpChapterTitle"></span><span id="jumpValue">0%</span></div><input id="progress" type="range" min="0" max="1000" value="0" aria-label="全书进度"></div>
-          <button id="nextChapterMenu" class="chapter-jump" type="button" aria-label="下一章"><span aria-hidden="true">›</span><small>下一章</small></button>
+          <button id="prevChapter" class="chapter-jump" type="button" aria-label="上一章">上一章</button>
+          <div class="jump-track">
+            <div class="jump-caption"><span id="jumpChapterTitle"></span><span id="jumpValue">0%</span></div>
+            <input id="progress" type="range" min="0" max="1000" value="0" aria-label="全书进度">
+          </div>
+          <button id="nextChapterMenu" class="chapter-jump" type="button" aria-label="下一章">下一章</button>
         </div>
-        <nav aria-label="阅读工具"><button id="tocBtn" type="button">目录</button><button id="listenBtn" type="button">听书</button><button id="bookmarksBtn" type="button">书签</button><button id="markBtn" type="button">加书签</button><button id="settingsBtn" type="button">Aa 设置</button></nav>
+        <nav aria-label="阅读工具">
+          <button id="tocBtn" type="button"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 9h8M8 13h8M8 17h5"/></svg></span><small>目录</small></button>
+          <button id="bookmarksBtn" type="button"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 4h12v17l-6-4-6 4V4z"/></svg></span><small>书签</small></button>
+          <button id="nightToggleBtn" type="button"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M19 14.5A7.5 7.5 0 0 1 9.5 5a7.5 7.5 0 1 0 9.5 9.5z"/></svg></span><small id="nightLabel">夜间</small></button>
+          <button id="settingsBtn" type="button"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3l7.5 4.3v9.4L12 21l-7.5-4.3V7.3L12 3z"/><circle cx="12" cy="12" r="2.2"/></svg></span><small>设置</small></button>
+        </nav>
       </div>
     </div>
   </section>
 
-  <!-- 番茄风沉浸听书页 -->
+  <!-- 图 2：未听书时点击正文右下角浮现的深棕「听」小圆圈 -->
+  <button id="listenFloatBtn" class="listen-float-btn" type="button" aria-label="开始听书" hidden>听</button>
+
+  <!-- 图 3：听书进行中悬浮迷你胶囊（在书架常驻；在阅读页点击屏幕后浮现） -->
+  <div id="ttsCapsule" class="tts-capsule" role="region" aria-label="听书悬浮控制" hidden>
+    <button id="capsuleOpenBtn" class="capsule-cover-btn" type="button" aria-label="进入听书页面">
+      <span id="capsuleDisc" class="capsule-disc" data-tone="0"><span id="capsuleChar">书</span></span>
+    </button>
+    <button id="capsulePlayBtn" class="capsule-icon-btn capsule-play" type="button" aria-label="播放或暂停">⏸</button>
+    <button id="capsuleVoiceBtn" class="capsule-icon-btn" type="button" aria-label="音色设置">⇄</button>
+    <button id="capsuleCloseBtn" class="capsule-icon-btn" type="button" aria-label="退出听书">×</button>
+  </div>
+
+  <!-- 图 4：番茄 1:1 橄榄绿沉浸「智能朗读」页面 -->
   <section id="listenView" class="listen-view" aria-label="智能朗读页面" hidden>
     <header class="listen-header">
-      <button id="listenMinBtn" class="listen-icon-btn" type="button" aria-label="收起为悬浮球">⌄</button>
+      <button id="listenMinBtn" class="listen-top-btn" type="button" aria-label="收起听书页">⌄</button>
       <span class="listen-header-title">智能朗读</span>
-      <div class="listen-header-right">
-        <button id="listenToReaderBtn" class="listen-pill-btn" type="button">看正文</button>
-        <button id="listenExitBtn" class="listen-pill-btn danger" type="button">退出</button>
-      </div>
+      <button id="listenExitBtn" class="listen-top-btn listen-exit-text" type="button" aria-label="退出听书">退出</button>
     </header>
-    <div class="listen-book-card">
+
+    <button id="listenBookRow" class="listen-book-row" type="button" aria-label="查看目录">
       <div id="listenCover" class="listen-cover" data-tone="0">书</div>
       <div class="listen-book-meta">
         <strong id="listenChapter">正在准备…</strong>
         <span id="listenBookTitle"></span>
       </div>
-    </div>
+      <span class="listen-chevron" aria-hidden="true">›</span>
+    </button>
+
     <div id="listenLyrics" class="listen-lyrics" aria-live="polite"></div>
+
     <div class="listen-panel">
+      <div class="listen-action-bar">
+        <button id="listenRateBtn" type="button"><span class="la-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2M9.5 2h5"/></svg></span><small id="listenRateLabel">1.0x</small></button>
+        <button id="listenToReaderBtn" type="button"><span class="la-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H12v17H6.5A2.5 2.5 0 0 0 4 22V5.5zM20 5.5A2.5 2.5 0 0 0 17.5 3H12v17h5.5a2.5 2.5 0 0 1 2.5 2V5.5z"/></svg></span><small>看正文</small></button>
+        <button id="listenVoiceMoreBtn" type="button"><span class="la-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"/></svg></span><small>音色</small></button>
+        <button id="listenMoreBtn" type="button"><span class="la-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="8.5" cy="12" r="1" fill="currentColor"/><circle cx="12" cy="12" r="1" fill="currentColor"/><circle cx="15.5" cy="12" r="1" fill="currentColor"/></svg></span><small>设置</small></button>
+      </div>
+
       <div class="listen-progress-row">
-        <span id="listenProgressText">0%</span>
+        <button id="listenBackSec" class="listen-sec-btn" type="button">-15s</button>
         <div class="listen-progress-bar"><span id="listenProgressFill"></span></div>
-        <span id="listenVoiceTag">多角色</span>
+        <span id="listenProgressText" class="listen-pct-text">0%</span>
       </div>
-      <div class="listen-main-controls">
-        <button id="listenPrevBtn" class="listen-step-btn" type="button" aria-label="上一段">‹ 上段</button>
+
+      <div class="listen-transport">
+        <button id="listenTocBtn" class="listen-side-btn" type="button"><span class="lt-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h11"/></svg></span><small>目录</small></button>
+        <button id="listenPrevBtn" class="listen-skip-btn" type="button" aria-label="上一段">⏮</button>
         <button id="listenPlayBtn" class="listen-play-btn" type="button" aria-label="播放或暂停">⏸</button>
-        <button id="listenNextBtn" class="listen-step-btn" type="button" aria-label="下一段">下段 ›</button>
+        <button id="listenNextBtn" class="listen-skip-btn" type="button" aria-label="下一段">⏭</button>
+        <button id="listenSleepBtn" class="listen-side-btn" type="button"><span class="lt-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 1.5M5 4l3 2M19 4l-3 2"/></svg></span><small id="listenSleepLabel">定时</small></button>
       </div>
-      <div class="listen-sub-controls">
-        <button id="listenTocBtn" type="button">目录</button>
-        <button id="listenVoiceBtn" type="button">音色</button>
-        <button id="listenRateBtn" type="button">1.0x</button>
-        <button id="listenSleepBtn" type="button">定时</button>
+
+      <div class="listen-bottom-cards">
+        <div class="listen-card listen-voice-card">
+          <button id="listenVoiceCardHead" class="listen-card-head" type="button">
+            <span>音色设置</span><span aria-hidden="true">›</span>
+          </button>
+          <div id="listenQuickVoices" class="listen-quick-voices"></div>
+        </div>
+        <button id="listenReadCard" class="listen-card listen-read-card" type="button">
+          <div class="listen-card-head"><span>边听边读</span><span aria-hidden="true">›</span></div>
+          <p id="listenReadChapter" class="listen-read-chapter"></p>
+        </button>
       </div>
     </div>
   </section>
-
-  <!-- 番茄风悬浮听书小圆圈 -->
-  <button id="ttsOrb" class="tts-orb" type="button" aria-label="打开听书页面" hidden>
-    <span id="ttsOrbDisc" class="tts-orb-disc" data-tone="0">
-      <span id="ttsOrbChar" class="tts-orb-char">听</span>
-    </span>
-    <span class="tts-orb-badge" aria-hidden="true">🎧</span>
-  </button>
 
   <dialog id="dialog" aria-labelledby="dialogTitle">
     <header class="dialog-header"><h2 id="dialogTitle"></h2><button id="closeDialog" type="button" aria-label="关闭">×</button></header>

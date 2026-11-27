@@ -369,6 +369,7 @@ function applySettings() {
   document.body.dataset.theme = theme;
   setThemeColor();
   viewport.dataset.mode = mode;
+  if ($('nightLabel')) $('nightLabel').textContent = theme === 'night' ? '日间' : '夜间';
 }
 
 function renderSection(index) {
@@ -767,7 +768,6 @@ async function openBookAndListen(book) {
   if (active && active.book.id !== book.id) closeReader();
   if (!active) await openBook(book);
   if (!active || active.book.id !== book.id) return;
-  ttsBarCollapsed = true;
   await tts.start(active.book.id, active.book.title, active.text, active.chapters, resumeOffset, resumeTime);
   setListenView(true);
 }
@@ -792,6 +792,14 @@ for (const btn of $('shelfFilter').querySelectorAll('button')) {
 }
 
 $('tocBtn').onclick = toc;
+$('nightToggleBtn').onclick = () => {
+  if (!active) return;
+  const cur = active.book.settings.theme;
+  active.book.settings.theme = cur === 'night' ? 'paper' : 'night';
+  applySettings();
+  store(active.book);
+};
+
 function startOrToggleListen({ preferSaved = false, openView = true } = {}) {
   if (!active) return;
   setMenu(false);
@@ -800,7 +808,6 @@ function startOrToggleListen({ preferSaved = false, openView = true } = {}) {
     else tts.togglePlay();
     return;
   }
-  ttsBarCollapsed = true;
   const saved = active.book.ttsProgress;
   const useSaved = Boolean(preferSaved && saved?.offset != null);
   const startAt = useSaved ? saved.offset : active.book.position;
@@ -812,13 +819,8 @@ function startOrToggleListen({ preferSaved = false, openView = true } = {}) {
   }
 }
 
-$('listenBtn').onclick = () => startOrToggleListen({ openView: true });
-$('quickListenBtn').onclick = () => {
+$('listenFloatBtn').onclick = () => {
   if (!active) return;
-  if (tts.active) {
-    setListenView(true);
-    return;
-  }
   const hasSaved = active.book.ttsProgress?.offset != null;
   const closeToSaved = hasSaved && Math.abs(active.book.ttsProgress.offset - active.book.position) <= 200;
   startOrToggleListen({ preferSaved: closeToSaved, openView: true });
@@ -829,7 +831,6 @@ $('settingsBtn').onclick = settings;
 
 const RATE_STEPS = [1.0, 1.25, 1.5, 1.75, 2.0, 0.85];
 let highlightedChunk = null;
-let ttsBarCollapsed = true;
 let listenViewOpen = false;
 let lastTtsState = null;
 
@@ -844,25 +845,42 @@ function getBookTone(bookId) {
   return String(idx >= 0 ? idx % 6 : 0);
 }
 
-// 悬浮小圆圈显示规则：
-// - 未听书或正在全屏「听书页面」时隐藏；
-// - 在「书架页」时始终悬浮显示；
-// - 在「阅读页」时平时隐藏不挡正文，点击阅读页呼出菜单时立即浮现！
+// 1:1 番茄四态控件显隐：
+// - 图 1（阅读页无菜单）：完全隐藏悬浮按钮与胶囊，屏幕 100% 干净；
+// - 图 2（阅读页点屏幕 + 未听书）：右下角浮现深棕「听」小圆圈；
+// - 图 3（阅读页点屏幕 + 正在听书）：左下角浮现半透明听书胶囊 + 正文每段前出现 (▶) 点击即读；
+// - 书架页 + 正在听书：左下角常驻半透明听书胶囊，返回书架不暂停；
+// - 图 4（打开智能朗读全屏页）：隐藏悬浮按钮与胶囊。
 function syncOrbVisibility() {
-  const orb = $('ttsOrb');
-  if (!orb) return;
-  if (!tts.active || listenViewOpen) {
-    orb.hidden = true;
+  const floatBtn = $('listenFloatBtn');
+  const capsule = $('ttsCapsule');
+  const readerEl = $('reader');
+  const inReader = Boolean(active && !readerEl.hidden);
+  const menuOpen = inReader && !$('readerMenus').hidden;
+
+  if (listenViewOpen) {
+    floatBtn.hidden = true;
+    capsule.hidden = true;
+    readerEl.classList.remove('tts-pick-mode');
     return;
   }
-  const inReader = Boolean(active && !$('reader').hidden);
+
+  if (!tts.active) {
+    capsule.hidden = true;
+    readerEl.classList.remove('tts-pick-mode');
+    floatBtn.hidden = !(inReader && menuOpen);
+    return;
+  }
+
+  floatBtn.hidden = true;
   if (!inReader) {
-    orb.classList.remove('in-reader-menu');
-    orb.hidden = false;
+    capsule.classList.remove('in-reader-menu');
+    capsule.hidden = false;
+    readerEl.classList.remove('tts-pick-mode');
   } else {
-    const menuOpen = !$('readerMenus').hidden;
-    orb.classList.toggle('in-reader-menu', menuOpen);
-    orb.hidden = !menuOpen;
+    capsule.classList.toggle('in-reader-menu', menuOpen);
+    capsule.hidden = !menuOpen;
+    readerEl.classList.toggle('tts-pick-mode', menuOpen && active.book.id === tts.bookId);
   }
 }
 
@@ -887,24 +905,40 @@ function renderListenView(state) {
   $('listenBookTitle').textContent = title;
 
   const chunk = state?.chunk || tts.getCurrentChunk();
-  $('listenChapter').textContent = chunk?.chapterTitle || title;
+  const chapterName = chunk?.chapterTitle || title;
+  $('listenChapter').textContent = chapterName;
+  $('listenReadChapter').textContent = chapterName;
 
   const totalLen = Math.max(1, book?.length || 1);
   const pct = chunk ? progressAt(chunk.start, totalLen, Boolean(book?.finished)) : 0;
   $('listenProgressText').textContent = `${pct}%`;
   $('listenProgressFill').style.width = `${pct}%`;
-  $('listenVoiceTag').textContent = state?.voiceName || '多角色';
 
   const loading = Boolean(state?.loading);
   const playing = Boolean(state?.playing);
   $('listenPlayBtn').textContent = loading ? '…' : playing ? '⏸' : '▶';
   $('listenPrevBtn').disabled = tts.chunkIndex <= 0;
   $('listenNextBtn').disabled = tts.chunkIndex >= tts.chunks.length - 1;
-  $('listenRateBtn').textContent = `${Number(state?.rate ?? tts.settings.rate).toFixed(2).replace(/\.?0+$/, '')}x`;
-  $('listenSleepBtn').textContent = state?.sleepLabel || tts.getSleepLabel();
+  $('listenRateLabel').textContent = `${Number(state?.rate ?? tts.settings.rate).toFixed(2).replace(/\.?0+$/, '')}x`;
+  $('listenSleepLabel').textContent = state?.sleepLabel || tts.getSleepLabel();
   $('listenSleepBtn').dataset.active = String((state?.sleepMode ?? tts.sleepMode) !== 'off');
 
-  // 渲染当前朗读段及前后语境（点击任意段可直接跳转朗读）
+  // 底部「音色设置」卡内直出 2 个常用音色快切卡（图 4 风格）
+  const activeVoice = state?.voice || tts.settings.voice;
+  const quickVoices = $('listenQuickVoices');
+  const featured = EDGE_VOICES.slice(0, 2);
+  quickVoices.replaceChildren(...featured.map(v => {
+    const chip = button(null, () => {
+      tts.updateSettings({ voice: v.id, customVoice: '' });
+      toast(`已切换：${v.name}`);
+    }, 'quick-voice-chip');
+    chip.setAttribute('aria-pressed', String(!tts.settings.customVoice && activeVoice === v.id));
+    if (v.badge) chip.append(element('span', v.badge, 'qv-tag'));
+    chip.append(element('strong', v.name.replace(' · 多角色', '')), element('small', v.desc.split(' · ')[0]));
+    return chip;
+  }));
+
+  // 渲染上下渐隐的朗读正文（点击任意段直接跳转）
   const lyrics = $('listenLyrics');
   const curIdx = tts.chunkIndex;
   const start = Math.max(0, curIdx - 1);
@@ -994,28 +1028,20 @@ function syncTtsHighlight(chunk = highlightedChunk) {
 
 function renderTtsBar(state) {
   lastTtsState = state;
-  const bar = $('ttsBar');
-  const quickBtn = $('quickListenBtn');
-  bar.hidden = true; // 改用悬浮小圆圈 + 沉浸听书页，阅读页不再被底栏挤占空间
-
   if (!state.active) {
     listenViewOpen = false;
     $('listenView').hidden = true;
-    quickBtn.textContent = '🎧 听书';
-    quickBtn.dataset.listening = 'false';
     syncOrbVisibility();
     return;
   }
 
-  quickBtn.dataset.listening = 'true';
-  quickBtn.textContent = state.loading ? '🎧 缓冲…' : state.playing ? '🎧 听书中' : '🎧 已暂停';
-
-  // 更新悬浮小圆圈外观与旋转状态
   const book = findListeningBook();
-  const title = book?.title || tts.bookTitle || '听';
-  $('ttsOrb').dataset.playing = String(Boolean(state.playing && !state.loading));
-  $('ttsOrbDisc').dataset.tone = getBookTone(tts.bookId);
-  $('ttsOrbChar').textContent = Array.from(title)[0] || '听';
+  const title = book?.title || tts.bookTitle || '书';
+  const playing = Boolean(state.playing && !state.loading);
+  $('ttsCapsule').dataset.playing = String(playing);
+  $('capsuleDisc').dataset.tone = getBookTone(tts.bookId);
+  $('capsuleChar').textContent = Array.from(title)[0] || '书';
+  $('capsulePlayBtn').textContent = state.loading ? '…' : state.playing ? '⏸' : '▶';
   syncOrbVisibility();
 
   if (listenViewOpen) renderListenView(state);
@@ -1048,14 +1074,7 @@ const tts = new TtsController({
   },
 });
 
-$('ttsOrb').onclick = () => setListenView(true);
-$('listenMinBtn').onclick = () => setListenView(false);
-$('listenExitBtn').onclick = () => {
-  tts.stop();
-  setListenView(false);
-  toast('已退出听书。');
-};
-$('listenToReaderBtn').onclick = async () => {
+async function jumpListenToReader() {
   const targetBook = findListeningBook();
   const curChunk = tts.getCurrentChunk();
   setListenView(false);
@@ -1066,11 +1085,41 @@ $('listenToReaderBtn').onclick = async () => {
     jumpTo(curChunk.start, { fromTts: true });
     syncTtsHighlight(curChunk);
   }
+}
+
+async function openListenToc() {
+  const targetBook = findListeningBook();
+  if (!targetBook) return;
+  if (active && active.book.id !== targetBook.id) closeReader();
+  if (!active) await openBook(targetBook);
+  if (active) toc();
+}
+
+$('capsuleOpenBtn').onclick = () => setListenView(true);
+$('capsulePlayBtn').onclick = () => tts.togglePlay();
+$('capsuleVoiceBtn').onclick = () => openTtsSettings();
+$('capsuleCloseBtn').onclick = () => {
+  tts.stop();
+  toast('已退出听书。');
 };
+
+$('listenMinBtn').onclick = () => setListenView(false);
+$('listenExitBtn').onclick = () => {
+  tts.stop();
+  setListenView(false);
+  toast('已退出听书。');
+};
+$('listenBookRow').onclick = openListenToc;
+$('listenTocBtn').onclick = openListenToc;
+$('listenToReaderBtn').onclick = jumpListenToReader;
+$('listenReadCard').onclick = jumpListenToReader;
 $('listenPlayBtn').onclick = () => tts.togglePlay();
 $('listenPrevBtn').onclick = () => tts.stepChunk(-1);
 $('listenNextBtn').onclick = () => tts.stepChunk(1);
-$('listenVoiceBtn').onclick = () => openTtsSettings();
+$('listenBackSec').onclick = () => tts.stepChunk(-1);
+$('listenVoiceCardHead').onclick = openTtsSettings;
+$('listenVoiceMoreBtn').onclick = openTtsSettings;
+$('listenMoreBtn').onclick = openTtsSettings;
 $('listenRateBtn').onclick = () => {
   const idx = RATE_STEPS.indexOf(Number(tts.settings.rate));
   const next = RATE_STEPS[(idx + 1) % RATE_STEPS.length];
@@ -1078,13 +1127,6 @@ $('listenRateBtn').onclick = () => {
   toast(`语速已切至 ${next}x`);
 };
 $('listenSleepBtn').onclick = () => openSleepDialog();
-$('listenTocBtn').onclick = async () => {
-  const targetBook = findListeningBook();
-  if (!targetBook) return;
-  if (active && active.book.id !== targetBook.id) closeReader();
-  if (!active) await openBook(targetBook);
-  if (active) toc();
-};
 
 function openSleepDialog() {
   const wrap = element('div', null, 'settings-row');
@@ -1277,25 +1319,6 @@ function openTtsSettings() {
   openDialog('音色设置', apiFields, webFields, rateRow, engineRow);
 }
 
-$('ttsPlay').onclick = () => tts.togglePlay();
-$('ttsPrev').onclick = () => tts.stepChunk(-1);
-$('ttsNext').onclick = () => tts.stepChunk(1);
-$('ttsCollapse').onclick = () => {
-  ttsBarCollapsed = true;
-  $('ttsBar').hidden = true;
-  requestAnimationFrame(() => {
-    if (active) jumpTo(active.book.position, { keepFinished: active.book.finished, fromTts: true });
-  });
-};
-$('ttsClose').onclick = () => tts.stop();
-$('ttsRate').onclick = () => {
-  const idx = RATE_STEPS.indexOf(Number(tts.settings.rate));
-  const next = RATE_STEPS[(idx + 1) % RATE_STEPS.length];
-  tts.updateSettings({ rate: next });
-  toast(`语速已切至 ${next}x`);
-};
-$('ttsSleep').onclick = openSleepDialog;
-$('ttsConfig').onclick = openTtsSettings;
 $('closeDialog').onclick = () => dialog.close();
 dialog.addEventListener('click', event => {
   if (event.target !== dialog) return;
@@ -1338,7 +1361,22 @@ $('nextSection').onclick = () => {
 viewport.addEventListener('scroll', scrollHandler, { passive: true });
 viewport.addEventListener('click', event => {
   if (!active || event.target.closest('button') || performance.now() - lastSwipe < 350 || getSelection()?.toString()) return;
-  if (!$('readerMenus').hidden) return setMenu(false);
+  if (!$('readerMenus').hidden) {
+    // 图 3 交互：听书时呼出菜单后，点击任意段落的 (▶) 或段落正文即可直接从该段开始朗读
+    if (tts.active && active.book.id === tts.bookId) {
+      const pNode = event.target.closest('p');
+      if (pNode) {
+        const hit = active.spans.find(s => s.node === pNode);
+        if (hit) {
+          tts.seekToOffset(hit.start);
+          setMenu(false);
+          toast('已从该段开始朗读');
+          return;
+        }
+      }
+    }
+    return setMenu(false);
+  }
   const bounds = viewport.getBoundingClientRect();
   const zone = (event.clientX - bounds.left) / bounds.width;
   if (active.book.settings.mode === 'scroll' || (zone >= .25 && zone <= .75)) setMenu(true);
