@@ -755,10 +755,11 @@ $('hideMenu').onclick = () => setMenu(false);
 $('menuToggle').onclick = () => setMenu($('readerMenus').hidden);
 async function openBookAndListen(book) {
   const resumeOffset = book.ttsProgress?.offset ?? book.position ?? 0;
+  const resumeTime = book.ttsProgress?.audioTime ?? 0;
   await openBook(book);
   if (!active || active.book.id !== book.id) return;
   ttsBarCollapsed = false;
-  await tts.start(active.book.id, active.book.title, active.text, active.chapters, resumeOffset);
+  await tts.start(active.book.id, active.book.title, active.text, active.chapters, resumeOffset, resumeTime);
 }
 
 $('viewToggle').onclick = () => {
@@ -795,10 +796,12 @@ function startOrToggleListen({ preferSaved = false } = {}) {
   }
   ttsBarCollapsed = false;
   const saved = active.book.ttsProgress;
-  const startAt = preferSaved && saved?.offset != null ? saved.offset : active.book.position;
-  tts.start(active.book.id, active.book.title, active.text, active.chapters, startAt);
-  if (!preferSaved && saved?.offset != null && Math.abs(saved.offset - active.book.position) > 400) {
-    toast('已从当前页开始听（点「定时」可回到上次听书点）');
+  const useSaved = Boolean(preferSaved && saved?.offset != null);
+  const startAt = useSaved ? saved.offset : active.book.position;
+  const resumeTime = useSaved ? (saved.audioTime || 0) : 0;
+  tts.start(active.book.id, active.book.title, active.text, active.chapters, startAt, resumeTime);
+  if (!useSaved && saved?.offset != null && Math.abs(saved.offset - active.book.position) > 200) {
+    toast('已从当前页首段开始听（点「定时」可回到上次听书点）');
   }
 }
 
@@ -814,7 +817,7 @@ $('quickListenBtn').onclick = () => {
     return;
   }
   const hasSaved = active.book.ttsProgress?.offset != null;
-  const closeToSaved = hasSaved && Math.abs(active.book.ttsProgress.offset - active.book.position) <= 400;
+  const closeToSaved = hasSaved && Math.abs(active.book.ttsProgress.offset - active.book.position) <= 200;
   startOrToggleListen({ preferSaved: closeToSaved });
 };
 $('bookmarksBtn').onclick = bookmarks;
@@ -825,7 +828,7 @@ const RATE_STEPS = [1.0, 1.25, 1.5, 1.75, 2.0, 0.85];
 let highlightedChunk = null;
 let ttsBarCollapsed = false;
 
-function persistListeningProgress(chunk) {
+function persistListeningProgress(chunk, audioTime = 0) {
   if (!active || !chunk) return;
   const { book } = active;
   const percent = progressAt(chunk.start, book.length, book.finished);
@@ -833,6 +836,7 @@ function persistListeningProgress(chunk) {
     bookId: book.id,
     bookTitle: book.title,
     offset: chunk.start,
+    audioTime: Number(audioTime) || 0,
     chapterTitle: chunk.chapterTitle || '',
     snippet: chunk.text.replace(/\s+/g, ' ').slice(0, 36),
     percent,
@@ -840,12 +844,47 @@ function persistListeningProgress(chunk) {
   };
   book.ttsProgress = {
     offset: record.offset,
+    audioTime: record.audioTime,
     chapterTitle: record.chapterTitle,
     snippet: record.snippet,
     percent: record.percent,
     updatedAt: record.updatedAt,
   };
   saveLastListened(record);
+  store(book);
+}
+
+function followTtsChunk(chunk) {
+  if (!active || !chunk) return;
+  const { book, sections } = active;
+  const targetSection = sectionAt(sections, chunk.start);
+  if (targetSection !== active.sectionIndex) {
+    jumpTo(chunk.start, { fromTts: true });
+    return;
+  }
+  const span = spanAt(chunk.start);
+  if (!span) {
+    jumpTo(chunk.start, { fromTts: true });
+    return;
+  }
+  if (book.settings.mode === 'page') {
+    const col = columnOf(charRect(span, chunk.start - span.start));
+    if (col !== active.page) {
+      jumpTo(chunk.start, { fromTts: true });
+      return;
+    }
+  } else {
+    const rect = span.node.getBoundingClientRect();
+    const vp = viewport.getBoundingClientRect();
+    if (rect.top < vp.top + 16 || rect.bottom > vp.bottom - 36) {
+      span.node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      active.programmaticTop = viewport.scrollTop;
+    }
+  }
+  book.position = chunk.start;
+  book.finished = false;
+  recordChapterProgress();
+  updateProgress();
   store(book);
 }
 
@@ -896,8 +935,12 @@ function renderTtsBar(state) {
 const tts = new TtsController({
   onChunkChange(chunk) {
     if (!active) return;
-    persistListeningProgress(chunk);
-    jumpTo(chunk.start, { fromTts: true });
+    persistListeningProgress(chunk, 0);
+    followTtsChunk(chunk);
+  },
+  onPauseProgress(chunk, audioTime) {
+    if (!active) return;
+    persistListeningProgress(chunk, audioTime);
   },
   onHighlight(chunk) {
     syncTtsHighlight(chunk);
@@ -937,7 +980,7 @@ function openSleepDialog() {
     const pct = saved.percent ?? progressAt(saved.offset, active.book.length, active.book.finished);
     const backBtn = button(`回到上次听书位置（${saved.chapterTitle || '断点'} · ${pct}%）`, () => {
       dialog.close();
-      if (active) tts.start(active.book.id, active.book.title, active.text, active.chapters, saved.offset);
+      if (active) tts.start(active.book.id, active.book.title, active.text, active.chapters, saved.offset, saved.audioTime || 0);
     }, 'primary');
     backBtn.style.width = '100%';
     backBtn.style.marginTop = '12px';
@@ -1213,7 +1256,13 @@ if (globalThis.ResizeObserver) new ResizeObserver(([entry]) => {
   });
 }).observe(viewport);
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden && scrollTimer) updateScrollPosition();
+  if (document.hidden) {
+    if (scrollTimer) updateScrollPosition();
+    if (tts.active) {
+      const chunk = tts.getCurrentChunk();
+      if (chunk) persistListeningProgress(chunk, tts.getCurrentAudioTime());
+    }
+  }
 });
 
 // 手机上不需要双指缩放或双击放大，字号由阅读设置控制。

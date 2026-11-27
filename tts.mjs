@@ -250,7 +250,11 @@ function splitLongParagraph(text, startOffset, maxChars) {
   return parts;
 }
 
-export function buildReadingChunks(text, chapters, maxChunkChars = 360) {
+// 按自然段精准切分朗读块：
+// - 正常自然段（>= 28 字且 <= 140 字）严格独立成块，实现单段精准高亮与零重复起播；
+// - 超长自然段（> 140 字）按句末标点拆分为 80~140 字语义短句；
+// - 极短段（< 28 字，如短标题或“嗯。”）仅与紧邻下一段合并至 >= 28 字，确保每段音频 >= 3 秒，防止 iPhone 锁屏循环回绕。
+export function buildReadingChunks(text, chapters, maxChunkChars = 140, minChunkChars = 28) {
   const chunks = [];
   for (let chapterIndex = 0; chapterIndex < chapters.length; chapterIndex++) {
     const chapter = chapters[chapterIndex];
@@ -258,7 +262,7 @@ export function buildReadingChunks(text, chapters, maxChunkChars = 360) {
     const chapterEnd = chapters[chapterIndex + 1]?.start ?? text.length;
     const raw = text.slice(chapterStart, chapterEnd);
 
-    const paragraphs = [];
+    const units = [];
     let pos = chapterStart;
     for (const line of raw.split('\n')) {
       const trimmed = line.trim();
@@ -266,9 +270,9 @@ export function buildReadingChunks(text, chapters, maxChunkChars = 360) {
         const lead = line.length - line.trimStart().length;
         const pStart = pos + lead;
         if (trimmed.length > maxChunkChars) {
-          paragraphs.push(...splitLongParagraph(trimmed, pStart, maxChunkChars));
+          units.push(...splitLongParagraph(trimmed, pStart, maxChunkChars));
         } else {
-          paragraphs.push({ start: pStart, end: pStart + trimmed.length, text: trimmed });
+          units.push({ start: pStart, end: pStart + trimmed.length, text: trimmed });
         }
       }
       pos += line.length + 1;
@@ -290,10 +294,13 @@ export function buildReadingChunks(text, chapters, maxChunkChars = 360) {
       bucketLen = 0;
     };
 
-    for (const para of paragraphs) {
-      if (bucket.length && bucketLen + para.text.length > maxChunkChars) flush();
-      bucket.push(para);
-      bucketLen += para.text.length + 1;
+    for (const unit of units) {
+      if (bucket.length && (bucketLen >= minChunkChars || bucketLen + unit.text.length > maxChunkChars)) {
+        flush();
+      }
+      bucket.push(unit);
+      bucketLen += unit.text.length + 1;
+      if (bucketLen >= minChunkChars) flush();
     }
     flush();
   }
@@ -439,8 +446,9 @@ export class TtsController {
     this.audio.addEventListener('timeupdate', () => {
       if (!this.active || !this.playing || this.switching || this.inKeepAlive) return;
       const { currentTime, duration } = this.audio;
-      const nearEnd = Number.isFinite(duration) && duration > 0.6 && (duration - currentTime) <= 0.35;
-      const wrapped = this.lastTime > 1.0 && currentTime < this.lastTime - 1.0;
+      const endMargin = Number.isFinite(duration) ? Math.min(0.32, Math.max(0.15, duration * 0.12)) : 0.25;
+      const nearEnd = Number.isFinite(duration) && duration > 0.4 && (duration - currentTime) <= endMargin;
+      const wrapped = this.lastTime > 0.45 && currentTime < this.lastTime - 0.3;
       this.lastTime = currentTime;
       if (nearEnd || wrapped) {
         this.#advanceChunk(1, { auto: true });
@@ -544,10 +552,24 @@ export class TtsController {
     return this.chunks[this.chunkIndex] ?? null;
   }
 
-  async start(bookId, bookTitle, text, chapters, startOffset) {
+  getCurrentAudioTime() {
+    if (this.settings.engine !== 'api' || this.inKeepAlive) return 0;
+    const t = this.audio.currentTime;
+    const d = this.audio.duration;
+    if (!Number.isFinite(t) || t < 0.5) return 0;
+    if (Number.isFinite(d) && d - t < 1.0) return 0;
+    return Math.round(t * 10) / 10;
+  }
+
+  async start(bookId, bookTitle, text, chapters, startOffset, resumeAudioTime = 0) {
     this.bookId = bookId;
     this.bookTitle = bookTitle;
-    this.chunks = buildReadingChunks(text, chapters, this.settings.engine === 'web' ? 180 : 360);
+    this.chunks = buildReadingChunks(
+      text,
+      chapters,
+      this.settings.engine === 'web' ? 120 : 140,
+      this.settings.engine === 'web' ? 16 : 28,
+    );
     if (!this.chunks.length) {
       this.cb.onToast?.('当前书籍没有可朗读的正文。');
       return;
@@ -562,7 +584,7 @@ export class TtsController {
       this.#primeAudioElement();
     }
     this.#requestWakeLock();
-    await this.#playChunk(this.chunkIndex, { fromUser: true });
+    await this.#playChunk(this.chunkIndex, { fromUser: true, resumeTime: resumeAudioTime });
   }
 
   #primeAudioElement() {
@@ -605,6 +627,8 @@ export class TtsController {
 
   pause() {
     if (!this.active) return;
+    const chunk = this.getCurrentChunk();
+    const audioTime = this.getCurrentAudioTime();
     this.sessionToken++;
     this.playing = false;
     this.loading = false;
@@ -615,11 +639,15 @@ export class TtsController {
     } else if ('speechSynthesis' in window) {
       window.speechSynthesis.cancel();
     }
+    if (chunk) this.cb.onPauseProgress?.(chunk, audioTime);
     this.#syncMediaSession();
     this.#emitState();
   }
 
   stop() {
+    const chunk = this.active ? this.getCurrentChunk() : null;
+    const audioTime = this.active ? this.getCurrentAudioTime() : 0;
+    if (chunk) this.cb.onPauseProgress?.(chunk, audioTime);
     this.sessionToken++;
     this.active = false;
     this.playing = false;
@@ -698,7 +726,7 @@ export class TtsController {
     await this.#playChunk(nextIndex, { fromUser: !auto });
   }
 
-  async #playChunk(index, { fromUser = false } = {}) {
+  async #playChunk(index, { fromUser = false, resumeTime = 0 } = {}) {
     const chunk = this.chunks[index];
     if (!chunk || !this.active) return;
 
@@ -731,6 +759,17 @@ export class TtsController {
       this.audio.src = blobUrl;
       this.#applyPlaybackRate();
       this.lastTime = 0;
+
+      if (resumeTime > 0.5) {
+        const applySeek = () => {
+          if (Number.isFinite(this.audio.duration) && resumeTime < this.audio.duration - 1.0) {
+            this.audio.currentTime = resumeTime;
+            this.lastTime = resumeTime;
+          }
+        };
+        if (this.audio.readyState >= 1) applySeek();
+        else this.audio.addEventListener('loadedmetadata', applySeek, { once: true });
+      }
 
       const playPromise = this.audio.play();
       if (playPromise) await playPromise;
@@ -819,7 +858,8 @@ export class TtsController {
   }
 
   #prefetchAhead(currentIndex) {
-    for (let offset = 1; offset <= 2; offset++) {
+    // 提前预加载后 4 个自然段（约 40~90 秒音频），单段切换零卡顿、锁屏更稳
+    for (let offset = 1; offset <= 4; offset++) {
       const target = currentIndex + offset;
       if (target < this.chunks.length && !this.cache.has(target)) {
         this.#ensureChunkAudio(target).catch(() => {});
@@ -829,7 +869,7 @@ export class TtsController {
 
   #pruneCache(currentIndex) {
     for (const [key, entry] of this.cache.entries()) {
-      if (key < currentIndex - 1 || key > currentIndex + 3) {
+      if (key < currentIndex - 1 || key > currentIndex + 5) {
         if (entry.blobUrl) URL.revokeObjectURL(entry.blobUrl);
         this.cache.delete(key);
       }
@@ -918,6 +958,7 @@ export class TtsController {
     if (!('mediaSession' in navigator)) return;
     try {
       navigator.mediaSession.playbackState = 'none';
+      navigator.mediaSession.metadata = null;
       for (const action of ['play', 'pause', 'previoustrack', 'nexttrack']) {
         navigator.mediaSession.setActionHandler(action, null);
       }
