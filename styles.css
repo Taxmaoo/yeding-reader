@@ -1646,3 +1646,153 @@ body[data-theme="night"] .voice-card[aria-pressed="true"] strong { color: var(--
   font-size: 14px;
 }
 
+/* ── 番茄小说下载 ───────────────────────────────────────────── */
+.dl-trigger { white-space: nowrap; }
+
+.dl-input {
+  width: 100%;
+  margin: 2px 0 6px;
+  padding: 11px 13px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 15px;
+}
+
+.dl-input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.dl-textarea {
+  min-height: 84px;
+  resize: vertical;
+  font-size: 13px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.dl-label {
+  display: block;
+  margin-top: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.dl-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--muted);
+}
+
+.dl-status {
+  margin: 6px 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+.dl-status.is-warn { color: var(--accent); }
+.dl-status.is-ok { color: #3f7d4e; }
+body[data-theme="night"] .dl-status.is-ok { color: #8fce9d; }
+
+.dl-results { margin-top: 8px; display: grid; gap: 2px; }
+
+.dl-book {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 2px;
+  border-bottom: 1px solid var(--line);
+}
+
+.dl-book-info { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
+.dl-book-title { font-size: 15px; line-height: 1.35; }
+.dl-book-meta { font-size: 12px; color: var(--muted); }
+.dl-book-abstract {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.dl-book-abstract:empty { display: none; }
+
+.dl-book-pick {
+  flex: none;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--soft);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.dl-download { margin-top: 10px; }
+
+.dl-title { display: block; font-size: 17px; line-height: 1.4; }
+.dl-meta { display: block; margin-top: 3px; font-size: 12px; color: var(--muted); }
+.dl-abstract { margin: 8px 0; font-size: 13px; line-height: 1.65; color: var(--muted); }
+
+.dl-row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+.dl-row-label { font-size: 13px; color: var(--muted); }
+
+.dl-limit {
+  width: 82px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.dl-bar {
+  height: 6px;
+  margin: 8px 0 4px;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.dl-bar > span {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width .25s ease;
+}
+
+.dl-cancel { align-self: flex-start; }
+
+.dl-add-card > span:first-child { font-size: 22px; line-height: 1; }
+
+.dl-add-btn {
+  display: block;
+  width: 100%;
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px dashed var(--line);
+  border-radius: 14px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.dl-add-btn:hover { color: var(--accent); }
+
+@media (max-width: 480px) {
+  .dl-trigger { display: none; }
+}
+
+.dl-pace {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 14px;
+}

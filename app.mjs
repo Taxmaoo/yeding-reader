@@ -1,18 +1,19 @@
-import { DEFAULT_SETTINGS, SAMPLE, decodeTxt, indexText, sectionAt, progressAt, isLowSurrogate } from './reader-core.mjs?v=20';
+import { DEFAULT_SETTINGS, SAMPLE, decodeTxt, indexText, sectionAt, progressAt, isLowSurrogate } from './reader-core.mjs?v=24';
 import {
   listBooks, readText, saveBook, addBook, putBook, deleteBook,
   saveMetaMirror, requestPersistentStorage,
-} from './storage.mjs?v=20';
+} from './storage.mjs?v=24';
 import {
   TtsController, EDGE_VOICES, SLEEP_OPTIONS,
   testTtsEndpoint, resolveApiEndpoint, loadLastListened, saveLastListened,
-} from './tts.mjs?v=20';
+} from './tts.mjs?v=24';
 import {
   generateSyncKey, validateSyncKey, loadSyncKey, saveSyncKey, loadLastSyncTime,
   markLocalDeleted, clearLocalDeleted, checkCloudStatus, pushBookMeta,
   uploadBookFull, syncAllBooks, scheduleMetaSync, flushMetaSync,
   exportLibraryBackup, importLibraryBackup,
-} from './sync.mjs?v=20';
+} from './sync.mjs?v=24';
+import { setupDownload, openUpdateForBook } from './download.mjs?v=24';
 
 const $ = id => document.getElementById(id);
 const viewport = $('viewport');
@@ -27,6 +28,7 @@ let resizeFrame;
 let importBusy = false;
 let touch;
 let lastSwipe = 0;
+let openDownload = () => {};
 
 function element(tag, text, className) {
   const node = document.createElement(tag);
@@ -173,6 +175,9 @@ function renderShelf() {
     const addCard = button(null, () => $('fileInput').click(), 'add-book-card');
     addCard.append(element('span', '＋'), element('span', '导入 TXT'));
     cards.push(addCard);
+    const downloadCard = button(null, () => openDownload(), 'add-book-card dl-add-card');
+    downloadCard.append(element('span', '⇣'), element('span', '下载小说'));
+    cards.push(downloadCard);
     list.replaceChildren(...cards);
   } else {
     list.replaceChildren(...filtered.map((book, i) => {
@@ -207,6 +212,7 @@ function renderShelf() {
       row.append(...children);
       return row;
     }));
+    list.append(button('⇣ 从番茄下载小说', () => openDownload(), 'dl-add-btn'));
   }
   $('empty').hidden = books.some(book => book.id === SAMPLE.id);
 }
@@ -250,6 +256,12 @@ function bookActions(book) {
     items.push(button('🎧 开始听这本书', () => {
       dialog.close();
       openBookAndListen(book);
+    }, 'dialog-item'));
+  }
+  if (book.remoteId) {
+    items.push(button('⇣ 继续下载 / 更新', () => {
+      dialog.close();
+      openUpdateForBook(book.remoteId, book.title);
     }, 'dialog-item'));
   }
   items.push(
@@ -1017,6 +1029,41 @@ function settings() {
 }
 
 $('importBtn').onclick = () => $('fileInput').click();
+
+// 番茄小说下载：服务端取正文，这里只负责把结果落进本机书架。
+openDownload = setupDownload({
+  // 按 remoteId 找书架上已有的书，用于「继续下载 / 更新」
+  findBookByRemote: remoteId => books.find(b => b.remoteId === remoteId) || null,
+  readText: id => readText(id),
+  // 新书入库 / 老书增量合并都走这里
+  upsertBook: async ({ title, author, remoteId, text, dl }) => {
+    const existing = books.find(b => b.remoteId === remoteId) || null;
+    const book = existing || makeBook(
+      globalThis.crypto?.randomUUID?.() ?? `book-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      String(title || '未命名小说').trim(),
+      text,
+    );
+    if (author) book.author = author;
+    book.remoteId = remoteId;
+    book.source = 'fanqie';
+    book.dl = dl;
+    book.length = text.length;
+    if (book.position > text.length) book.position = text.length;
+    await addBook(book, text);
+    clearLocalDeleted(book.id);
+    if (!existing) books.push(book);
+    saveMetaMirror(books);
+    renderShelf();
+    if (loadSyncKey()) {
+      uploadBookFull(book, text)
+        .then(() => { updateCloudBtnState(); toast(`《${book.title}》已同步至私人云书库`); })
+        .catch(() => {});
+    }
+    return book;
+  },
+  openBook: book => openBook(book),
+  toast,
+});
 $('fileInput').onchange = event => {
   const file = event.currentTarget.files?.[0];
   event.currentTarget.value = '';
