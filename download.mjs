@@ -457,6 +457,12 @@ function openResumePanel({ bookId, catalog, existing, seed }) {
     return;
   }
 
+  // 章序自检：书名里的「第N章」应当单调递增；倒挂说明正文顺序被旧版本拼乱
+  const chapterNo = title => Number((String(title || '').match(/第\s*(\d+)\s*章/) || [])[1] || 0);
+  const seq = manifest.map(entry => chapterNo(entry.title)).filter(Boolean);
+  let inversions = 0;
+  for (let i = 1; i < seq.length; i += 1) if (seq[i] < seq[i - 1]) inversions += 1;
+
   const uptoDate = missing.length === 0 && failed.length === 0;
   const start = button(uptoDate ? '已是最新（重新核对）' : `继续下载（${missing.length} 新章${failed.length ? ` + 补 ${failed.length} 章` : ''}）`, async () => {
     writeSetting(PACE_KEY, pace.value);
@@ -474,6 +480,9 @@ function openResumePanel({ bookId, catalog, existing, seed }) {
       + (failed.length ? ` · 上次失败 ${failed.length} 章` : '')
       + (uptoDate ? ' · 已经是最新' : ''),
     uptoDate ? 'is-ok' : ''),
+    inversions > 0
+      ? statusLine(`⚠ 检测到章序错乱 ${inversions} 处（旧版本拼接所致），建议「重新下载整本」`, 'is-warn')
+      : null,
     paceRow,
     actionRow(start, button('下载任务', () => openTasksPanel(), 'secondary'), button('重新下载整本', () => {
       openPanel('重新下载整本？',
