@@ -1,9 +1,9 @@
-import { DEFAULT_SETTINGS, SAMPLE, decodeTxt, indexText, sectionAt, progressAt, isLowSurrogate } from './reader-core.mjs?v=16';
-import { listBooks, readText, saveBook, addBook, deleteBook } from './storage.mjs?v=16';
+import { DEFAULT_SETTINGS, SAMPLE, decodeTxt, indexText, sectionAt, progressAt, isLowSurrogate } from './reader-core.mjs?v=17';
+import { listBooks, readText, saveBook, addBook, deleteBook } from './storage.mjs?v=17';
 import {
   TtsController, EDGE_VOICES, SLEEP_OPTIONS,
   testTtsEndpoint, resolveApiEndpoint, loadLastListened, saveLastListened,
-} from './tts.mjs?v=16';
+} from './tts.mjs?v=17';
 
 const $ = id => document.getElementById(id);
 const viewport = $('viewport');
@@ -574,7 +574,6 @@ function syncChapterUI() {
   for (const row of list.children) updateChapterRow(row, Number(row.dataset.chapter), effIdx);
   const countEl = dialog.querySelector('.toc-count-label');
   if (countEl) countEl.textContent = `共 ${active.chapters.length} 章 · 当前第 ${effIdx + 1} 章`;
-  snapTocToCurrent(false);
 }
 
 function updateProgress() {
@@ -749,7 +748,7 @@ function toc(initialTab = 'toc') {
     reversed = !reversed;
     sortBtn.textContent = reversed ? '正序' : '倒序';
     renderChapterRows();
-    requestAnimationFrame(() => snapTocToCurrent(false));
+    scrollWrap.scrollTop = 0;
   }, 'toc-sub-btn');
   subActions.append(locateBtn, sortBtn);
   subbar.append(countLabel, subActions);
@@ -829,7 +828,6 @@ function toc(initialTab = 'toc') {
     subbar.hidden = !isToc || !results.hidden;
     chapterList.hidden = !isToc || !results.hidden;
     marksPane.hidden = isToc || !results.hidden;
-    if (isToc && results.hidden) requestAnimationFrame(() => snapTocToCurrent(false));
     if (!isToc) renderMarksPane();
   }
 
