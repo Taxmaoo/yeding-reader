@@ -128,7 +128,7 @@ function openPanel(title, ...content) {
   const dialog = $('dialog');
   dialog.classList.remove('toc-sheet');
   $('dialogTitle').textContent = title;
-  $('dialogBody').replaceChildren(...content);
+  $('dialogBody').replaceChildren(...content.filter(Boolean));
   $('dialogBody').scrollTop = 0;
   if (!dialog.open) dialog.showModal();
 }
@@ -211,12 +211,12 @@ function renderTaskList(box) {
     const status = STATUS_TEXT[task.status] || task.status;
     const row = element('div', null, 'dl-task');
     const info = element('div', null, 'dl-task-info');
-    info.append(
+    info.append(...[
       element('strong', task.title, 'dl-task-title'),
       element('span', `${status} · 已取 ${task.done}/${task.total || '?'} 章${task.total ? ` · ${pct}%` : ''}`,
         `dl-task-meta${task.status === 'done' ? ' is-ok' : task.status === 'error' ? ' is-warn' : ''}`),
       task.message && task.status !== 'running' ? element('span', task.message, 'dl-task-msg') : null,
-    );
+    ].filter(Boolean));
     const bar = element('div', null, 'dl-bar');
     const fill = element('span');
     fill.style.width = `${pct}%`;
@@ -225,6 +225,11 @@ function renderTaskList(box) {
     const actions = element('div', null, 'dl-task-actions');
     if (task.status === 'running') {
       actions.append(button('暂停', () => { pauseTask(task.id); renderTaskList(box); }, 'secondary'));
+    } else if (task.status === 'done' && task.missing > 0) {
+      actions.append(button(`补漏（${task.missing} 章）`, async () => {
+        await resumeTask(task.id, null);
+        renderTaskList(box);
+      }, 'secondary'));
     } else if (task.status === 'queued' || task.status === 'paused' || task.status === 'stopped' || task.status === 'error') {
       actions.append(button('继续', async () => {
         await resumeTask(task.id, null);
@@ -250,6 +255,16 @@ function mountTaskList(box) {
     }
     renderTaskList(box);
   }, 1500);
+}
+
+function openTasksPanel() {
+  const box = element('div', null, 'dl-tasks');
+  renderTaskList(box);
+  mountTaskList(box);
+  openPanel('下载任务', box, actionRow(
+    button('去下载', () => openHome(), 'primary'),
+    button('关闭', () => { const d = $('dialog'); if (d.open) d.close(); }, 'secondary'),
+  ));
 }
 
 function openHome(message = '') {
@@ -324,13 +339,9 @@ function openHome(message = '') {
     button('账号 Cookie / 代理', openAdvanced, 'secondary'),
   );
 
-  const taskBox = element('div', null, 'dl-tasks');
-  mountTaskList(taskBox);
-
   openPanel('下载番茄小说', warn, input, actions, resultBox,
     element('p', '把番茄上的小说抓到本机书架。已在书架里的书再次打开会走「继续下载 / 更新」，只补新章和上次失败的章。', 'dl-hint'),
-    element('h3', '下载任务', 'dl-section'),
-    taskBox);
+    actionRow(button(`下载任务（${pendingCount()}）`, () => openTasksPanel(), 'secondary')));
   input.focus({ preventScroll: true });
 }
 
@@ -419,7 +430,7 @@ function openFreshPanel({ bookId, catalog, seed }) {
     element('span', meta, 'dl-meta'),
     catalog.abstract ? element('p', catalog.abstract, 'dl-abstract') : null,
     statusLine(`共 ${all.length} 章，默认整本下载（约 ${minutes} 分钟）。被限流时会自动放慢并更换设备身份续抓；取不到的章节会在正文里标注，事后可「继续下载」补回。`),
-    limitRow, paceRow, actionRow(start, button('下载任务', () => openHome(), 'secondary')), body);
+    limitRow, paceRow, actionRow(start, button('下载任务', () => openTasksPanel(), 'secondary')), body);
 }
 
 function openResumePanel({ bookId, catalog, existing, seed }) {
@@ -464,7 +475,7 @@ function openResumePanel({ bookId, catalog, existing, seed }) {
       + (uptoDate ? ' · 已经是最新' : ''),
     uptoDate ? 'is-ok' : ''),
     paceRow,
-    actionRow(start, button('下载任务', () => openHome(), 'secondary'), button('重新下载整本', () => {
+    actionRow(start, button('下载任务', () => openTasksPanel(), 'secondary'), button('重新下载整本', () => {
       openPanel('重新下载整本？',
         statusLine('会用番茄上的最新内容替换这本书的正文，阅读进度和书签保留。', 'is-warn'),
         actionRow(button('确认替换', async () => {
@@ -631,8 +642,8 @@ async function runDownload({
         if (!stillBad) break;
         if (attempt === 0) await sleep(900);
         else {
-          delay = Math.min(1600, Math.round(delay * 1.5));
-          await sleep(1200);
+          delay = Math.min(2500, Math.round(delay * 1.6));
+          await sleep(Math.max(1500, delay));
         }
       }
 
@@ -648,6 +659,37 @@ async function runDownload({
       tick();
       if (i + BATCH < chapters.length) await sleep(delay);
       if (pace.cooldownEvery && done % pace.cooldownEvery < BATCH) await sleep(pace.cooldown);
+    }
+
+    // ②½ 补漏：跑完后对仍失败的章做多轮延时重试，风控窗口通常几秒到几十秒
+    if (!cancelled && rows.some(row => !row.ok)) {
+      const waits = [2000, 5000, 12000, 25000];
+      for (let round = 0; round < waits.length; round += 1) {
+        const failed = rows.filter(row => !row.ok);
+        if (!failed.length) break;
+        log.textContent = `补漏第 ${round + 1}/${waits.length} 轮：${failed.length} 章待补，先等 ${Math.round(waits[round] / 1000)}s…`;
+        await sleep(waits[round]);
+        for (let i = 0; i < failed.length; i += BATCH) {
+          if (cancelled) break;
+          const slice = failed.slice(i, i + BATCH);
+          let page = [];
+          try {
+            // 第 2 轮起换设备身份，绕开单设备的风控窗口
+            page = await requestPage(slice.map(row => ({ id: row.id, title: row.title })), round >= 1);
+          } catch {
+            page = [];
+          }
+          for (const row of page) {
+            if (!row?.ok) continue;
+            const index = rows.findIndex(item => item.id === row.id);
+            if (index >= 0) rows[index] = row;
+          }
+          await sleep(Math.max(600, Math.round(delay / 2)));
+        }
+        if (!rows.some(row => !row.ok)) break;
+      }
+      failedCount = rows.filter(row => !row.ok).length;
+      tick('补漏完成');
     }
 
     if (total === 0) {
@@ -721,7 +763,7 @@ async function runDownload({
       cancelled ? (stopReason === 'pause' ? '（已暂停，进度已保存）' : '（已按停止保存）') : '',
     ].filter(Boolean).join('，') + '。';
     log.className = 'dl-status is-ok';
-    if (task) updateTask(task.id, { added: okCount, message: log.textContent });
+    if (task) updateTask(task.id, { added: okCount, missing: stillMissing, message: log.textContent });
     container.append(actionRow(button('开始阅读', () => { if (saved) hooks.openBook?.(saved); }, 'primary')));
   } catch (err) {
     log.textContent = err.message || '下载中断';

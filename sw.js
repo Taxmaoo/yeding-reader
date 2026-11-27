@@ -2,18 +2,18 @@
 
 const SCOPE = new URL(self.registration.scope);
 // 发布静态资源的任何变更时递增版本号；不同部署目录互不清理缓存。
-const VERSION = 'v31';
+const VERSION = 'v33';
 const CACHE_PREFIX = `yeding-reader:${encodeURIComponent(SCOPE.href)}:`;
 const CACHE_NAME = `${CACHE_PREFIX}${VERSION}`;
 const STATIC_URLS = new Set([
   'index.html',
-  'styles.css?v=31',
-  'app.mjs?v=31',
-  'reader-core.mjs?v=31',
-  'storage.mjs?v=31',
-  'tts.mjs?v=31',
-  'sync.mjs?v=31',
-  'download.mjs?v=31',
+  'styles.css?v=33',
+  'app.mjs?v=33',
+  'reader-core.mjs?v=33',
+  'storage.mjs?v=33',
+  'tts.mjs?v=33',
+  'sync.mjs?v=33',
+  'download.mjs?v=33',
   'manifest.webmanifest',
   'icon-192.png',
   'icon-512.png',
