@@ -241,10 +241,236 @@ function speedToRate(speed = 1.0) {
 function corsHeaders() {
   return {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Sync-Key',
     'Access-Control-Max-Age': '86400',
   };
+}
+
+let vaultSchemaReady = false;
+
+async function ensureVaultSchema(db) {
+  if (vaultSchemaReady) return;
+  await db.batch([
+    db.prepare(
+      `CREATE TABLE IF NOT EXISTS books (
+        vault_id TEXT NOT NULL,
+        book_id TEXT NOT NULL,
+        meta_json TEXT NOT NULL,
+        has_text INTEGER NOT NULL DEFAULT 0,
+        text_hash TEXT NOT NULL DEFAULT '',
+        encoding TEXT NOT NULL DEFAULT 'gzip',
+        chunk_count INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL,
+        deleted INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (vault_id, book_id)
+      )`,
+    ),
+    db.prepare(
+      `CREATE TABLE IF NOT EXISTS book_chunks (
+        vault_id TEXT NOT NULL,
+        book_id TEXT NOT NULL,
+        chunk_idx INTEGER NOT NULL,
+        data_b64 TEXT NOT NULL,
+        PRIMARY KEY (vault_id, book_id, chunk_idx)
+      )`,
+    ),
+    db.prepare(
+      `CREATE INDEX IF NOT EXISTS idx_books_vault_updated ON books (vault_id, updated_at DESC)`,
+    ),
+  ]);
+  vaultSchemaReady = true;
+}
+
+async function resolveVaultId(request) {
+  const raw = String(request.headers.get('X-Sync-Key') || '').trim();
+  if (raw.length < 10) {
+    throw Object.assign(new Error('同步码至少需要 10 位字符'), { status: 400 });
+  }
+  if (/^\d+$/.test(raw)) {
+    throw Object.assign(new Error('为防止与他人撞码，同步码不能为纯数字'), { status: 400 });
+  }
+  const bytes = new TextEncoder().encode(`yeding-vault-v1:${raw}`);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function validBookId(id) {
+  return typeof id === 'string' && id.length >= 1 && id.length <= 160 && !/[\\/\0]/.test(id);
+}
+
+async function handleSyncRequest(request, url, env) {
+  if (!env?.DB) {
+    return Response.json({ error: '云书库尚未绑定 D1 数据库' }, { status: 503, headers: corsHeaders() });
+  }
+  let vaultId;
+  try {
+    vaultId = await resolveVaultId(request);
+  } catch (err) {
+    return Response.json({ error: err.message }, { status: err.status || 400, headers: corsHeaders() });
+  }
+
+  try {
+    await ensureVaultSchema(env.DB);
+    const sub = url.pathname.slice('/api/sync'.length);
+
+    if (sub === '/status' && request.method === 'GET') {
+      const row = await env.DB.prepare(
+        `SELECT COUNT(*) AS bookCount, COALESCE(SUM(chunk_count), 0) AS totalChunks
+         FROM books WHERE vault_id = ? AND deleted = 0`,
+      ).bind(vaultId).first();
+      return Response.json(
+        {
+          ok: true,
+          bookCount: Number(row?.bookCount || 0),
+          totalChunks: Number(row?.totalChunks || 0),
+          serverTime: Date.now(),
+        },
+        { headers: { ...corsHeaders(), 'Cache-Control': 'no-store' } },
+      );
+    }
+
+    if (sub === '/books' && request.method === 'GET') {
+      const { results } = await env.DB.prepare(
+        `SELECT book_id, meta_json, has_text, text_hash, encoding, chunk_count, updated_at, deleted
+         FROM books WHERE vault_id = ? ORDER BY updated_at DESC`,
+      ).bind(vaultId).all();
+      const books = (results || []).map(r => {
+        let meta = null;
+        try { meta = JSON.parse(r.meta_json); } catch {}
+        return {
+          bookId: r.book_id,
+          meta,
+          hasText: Boolean(r.has_text),
+          textHash: r.text_hash || '',
+          encoding: r.encoding || 'gzip',
+          chunkCount: Number(r.chunk_count || 0),
+          updatedAt: Number(r.updated_at || 0),
+          deleted: Boolean(r.deleted),
+        };
+      });
+      return Response.json(
+        { ok: true, serverTime: Date.now(), books },
+        { headers: { ...corsHeaders(), 'Cache-Control': 'no-store' } },
+      );
+    }
+
+    const metaMatch = /^\/books\/([^/]+)\/meta$/.exec(sub);
+    if (metaMatch && (request.method === 'PUT' || request.method === 'POST')) {
+      const bookId = decodeURIComponent(metaMatch[1]);
+      if (!validBookId(bookId)) {
+        return Response.json({ error: '无效的书籍 ID' }, { status: 400, headers: corsHeaders() });
+      }
+      const body = await request.json();
+      const updatedAt = Math.max(1, Number(body.updatedAt) || Date.now());
+      const deleted = Boolean(body.deleted);
+      const metaJson = JSON.stringify(body.meta || { id: bookId });
+      if (metaJson.length > 512 * 1024) {
+        return Response.json({ error: '书籍元数据过大' }, { status: 413, headers: corsHeaders() });
+      }
+      if (deleted) {
+        await env.DB.batch([
+          env.DB.prepare(
+            `INSERT INTO books (vault_id, book_id, meta_json, has_text, text_hash, encoding, chunk_count, updated_at, deleted)
+             VALUES (?, ?, ?, 0, '', 'gzip', 0, ?, 1)
+             ON CONFLICT(vault_id, book_id) DO UPDATE SET
+               meta_json = excluded.meta_json,
+               has_text = 0,
+               text_hash = '',
+               chunk_count = 0,
+               updated_at = excluded.updated_at,
+               deleted = 1`,
+          ).bind(vaultId, bookId, metaJson, updatedAt),
+          env.DB.prepare(`DELETE FROM book_chunks WHERE vault_id = ? AND book_id = ?`).bind(vaultId, bookId),
+        ]);
+      } else {
+        await env.DB.prepare(
+          `INSERT INTO books (vault_id, book_id, meta_json, updated_at, deleted)
+           VALUES (?, ?, ?, ?, 0)
+           ON CONFLICT(vault_id, book_id) DO UPDATE SET
+             meta_json = excluded.meta_json,
+             updated_at = CASE WHEN excluded.updated_at >= books.updated_at THEN excluded.updated_at ELSE books.updated_at END,
+             deleted = 0`,
+        ).bind(vaultId, bookId, metaJson, updatedAt).run();
+      }
+      return Response.json({ ok: true, bookId, updatedAt, deleted }, { headers: corsHeaders() });
+    }
+
+    const chunkMatch = /^\/books\/([^/]+)\/chunk\/(\d+)$/.exec(sub);
+    if (chunkMatch) {
+      const bookId = decodeURIComponent(chunkMatch[1]);
+      const idx = Number(chunkMatch[2]);
+      if (!validBookId(bookId) || !Number.isInteger(idx) || idx < 0 || idx > 500) {
+        return Response.json({ error: '无效的分片参数' }, { status: 400, headers: corsHeaders() });
+      }
+      if (request.method === 'PUT' || request.method === 'POST') {
+        const body = await request.json();
+        const dataB64 = String(body.dataB64 || '');
+        if (!dataB64 || dataB64.length > 800 * 1024) {
+          return Response.json({ error: '分片数据无效或超过大小限制' }, { status: 400, headers: corsHeaders() });
+        }
+        await env.DB.prepare(
+          `INSERT INTO book_chunks (vault_id, book_id, chunk_idx, data_b64)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(vault_id, book_id, chunk_idx) DO UPDATE SET data_b64 = excluded.data_b64`,
+        ).bind(vaultId, bookId, idx, dataB64).run();
+        return Response.json({ ok: true, bookId, idx }, { headers: corsHeaders() });
+      }
+      if (request.method === 'GET') {
+        const row = await env.DB.prepare(
+          `SELECT data_b64 FROM book_chunks WHERE vault_id = ? AND book_id = ? AND chunk_idx = ?`,
+        ).bind(vaultId, bookId, idx).first();
+        if (!row) {
+          return Response.json({ error: '分片不存在' }, { status: 404, headers: corsHeaders() });
+        }
+        return Response.json(
+          { ok: true, bookId, idx, dataB64: row.data_b64 },
+          { headers: { ...corsHeaders(), 'Cache-Control': 'private, max-age=300' } },
+        );
+      }
+    }
+
+    const commitMatch = /^\/books\/([^/]+)\/commit$/.exec(sub);
+    if (commitMatch && request.method === 'POST') {
+      const bookId = decodeURIComponent(commitMatch[1]);
+      if (!validBookId(bookId)) {
+        return Response.json({ error: '无效的书籍 ID' }, { status: 400, headers: corsHeaders() });
+      }
+      const body = await request.json();
+      const chunkCount = Number(body.chunkCount || 0);
+      const textHash = String(body.textHash || '').slice(0, 128);
+      const encoding = body.encoding === 'utf8' ? 'utf8' : 'gzip';
+      const updatedAt = Math.max(1, Number(body.updatedAt) || Date.now());
+      const metaJson = JSON.stringify(body.meta || { id: bookId });
+      if (!Number.isInteger(chunkCount) || chunkCount < 1 || chunkCount > 500) {
+        return Response.json({ error: '分片数量无效' }, { status: 400, headers: corsHeaders() });
+      }
+      await env.DB.batch([
+        env.DB.prepare(`DELETE FROM book_chunks WHERE vault_id = ? AND book_id = ? AND chunk_idx >= ?`)
+          .bind(vaultId, bookId, chunkCount),
+        env.DB.prepare(
+          `INSERT INTO books (vault_id, book_id, meta_json, has_text, text_hash, encoding, chunk_count, updated_at, deleted)
+           VALUES (?, ?, ?, 1, ?, ?, ?, ?, 0)
+           ON CONFLICT(vault_id, book_id) DO UPDATE SET
+             meta_json = excluded.meta_json,
+             has_text = 1,
+             text_hash = excluded.text_hash,
+             encoding = excluded.encoding,
+             chunk_count = excluded.chunk_count,
+             updated_at = excluded.updated_at,
+             deleted = 0`,
+        ).bind(vaultId, bookId, metaJson, textHash, encoding, chunkCount, updatedAt),
+      ]);
+      return Response.json({ ok: true, bookId, chunkCount, updatedAt }, { headers: corsHeaders() });
+    }
+
+    return Response.json({ error: 'Not Found' }, { status: 404, headers: corsHeaders() });
+  } catch (err) {
+    return Response.json(
+      { error: err?.message || '云书库读写失败' },
+      { status: 500, headers: corsHeaders() },
+    );
+  }
 }
 
 async function synthesizeEdgeTts(text, voice, speed) {
@@ -409,7 +635,14 @@ export default {
 
     const url = new URL(request.url);
     if (url.pathname === '/health') {
-      return Response.json({ ok: true, engine: 'cloudflare-edge-tts', version: 'v3', multiRole: true }, { headers: corsHeaders() });
+      return Response.json(
+        { ok: true, engine: 'cloudflare-edge-tts', version: 'v4', multiRole: true, cloudVault: Boolean(env?.DB) },
+        { headers: corsHeaders() },
+      );
+    }
+
+    if (url.pathname.startsWith('/api/sync/')) {
+      return handleSyncRequest(request, url, env);
     }
 
     if ((url.pathname === '/v1/audio/speech' || url.pathname === '/api/tts') && request.method === 'POST') {
