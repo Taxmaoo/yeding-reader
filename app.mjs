@@ -1,21 +1,21 @@
-import { DEFAULT_SETTINGS, SAMPLE, decodeTxt, indexText, sectionAt, progressAt, isLowSurrogate } from './reader-core.mjs?v=40';
+import { DEFAULT_SETTINGS, SAMPLE, decodeTxt, indexText, sectionAt, progressAt, isLowSurrogate } from './reader-core.mjs?v=41';
 import {
   listBooks, listTextIds, readText, saveBook, addBook, putBook, deleteBook,
   saveMetaMirror, requestPersistentStorage, readDownloadRows, saveDownloadRows, clearDownloadRows,
-} from './storage.mjs?v=40';
+} from './storage.mjs?v=41';
 import {
   TtsController, EDGE_VOICES, SLEEP_OPTIONS,
   testTtsEndpoint, resolveApiEndpoint, loadLastListened, saveLastListened,
-} from './tts.mjs?v=40';
+} from './tts.mjs?v=41';
 import {
   generateSyncKey, validateSyncKey, loadSyncKey, saveSyncKey, loadLastSyncTime,
   markLocalDeleted, clearLocalDeleted, checkCloudStatus, pushBookMeta,
   uploadBookFull, recoverBookFromCloud, syncAllBooks, scheduleMetaSync, flushMetaSync,
   exportLibraryBackup, importLibraryBackup,
-} from './sync.mjs?v=40';
-import { setupDownload, openUpdateForBook } from './download.mjs?v=40';
+} from './sync.mjs?v=41';
+import { setupDownload, openUpdateForBook } from './download.mjs?v=41';
 
-const APP_VERSION = 'v40';
+const APP_VERSION = 'v41';
 
 const $ = id => document.getElementById(id);
 const viewport = $('viewport');
@@ -30,7 +30,8 @@ let resizeFrame;
 let importBusy = false;
 let touch;
 let lastSwipe = 0;
-let openDownload = () => {};
+let shelfScroll = 0;
+const shelfTextWrites = new Map();
 
 function element(tag, text, className) {
   const node = document.createElement(tag);
@@ -52,11 +53,23 @@ function toast(message) {
   toastTimer = setTimeout(() => { $('toast').textContent = ''; }, 3000);
 }
 
-function store(book) {
-  if (book) book.lastRead = Date.now();
+async function store(book) {
+  book.lastRead = Date.now();
+  const pending = shelfTextWrites.get(book.id);
+  if (pending) await pending.catch(() => {});
+  const shelfBook = books.find(item => item.id === book.id);
+  let record = book;
+  if ((shelfBook?.dl?.updatedAt || 0) > (book.dl?.updatedAt || 0)) {
+    // 下载可在读旧正文时完成。保存断点时沿用已落盘的新正文清单。
+    record = { ...book, length: shelfBook.length, dl: shelfBook.dl, textUpdatedAt: shelfBook.textUpdatedAt,
+      position: Math.min(book.position, Math.max(0, shelfBook.length - 1)) };
+    if (shelfBook.textHash) record.textHash = shelfBook.textHash;
+    else delete record.textHash;
+    Object.assign(shelfBook, record);
+  }
   saveMetaMirror(books);
-  scheduleMetaSync(book);
-  return saveBook(book).catch(() => toast('保存阅读进度失败。'));
+  scheduleMetaSync(record);
+  return saveBook(record).catch(() => toast('保存阅读进度失败。'));
 }
 
 const SHELF_VIEW_KEY = 'yeding-shelf-view-v1';
@@ -90,6 +103,7 @@ function renderResumeCard() {
   if (!targetBook) {
     card.hidden = true;
     card.replaceChildren();
+    $('shelfResume').hidden = $('resumeReadCard').hidden;
     return;
   }
   const prog = (targetBook.ttsProgress?.updatedAt || 0) >= (saved?.updatedAt || 0)
@@ -104,7 +118,7 @@ function renderResumeCard() {
   const ago = formatTimeAgo(prog?.updatedAt);
   const chapterText = prog?.chapterTitle ? `${prog.chapterTitle} · ` : '';
   info.append(
-    element('span', `🎧 上次听书${ago ? ` · ${ago}` : ''}`, 'resume-label'),
+    element('span', `听书断点${ago ? ` · ${ago}` : ''}`, 'resume-label'),
     element('strong', targetBook.title, 'resume-title'),
     element('span', `${chapterText}听到 ${percent}%`, 'resume-meta'),
   );
@@ -112,20 +126,44 @@ function renderResumeCard() {
   btn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" style="vertical-align:-1px;margin-right:4px"><path d="M7.5 4.8a1.5 1.5 0 0 1 2.25-1.3l11.2 6.5a1.5 1.5 0 0 1 0 2.6l-11.2 6.5a1.5 1.5 0 0 1-2.25-1.3V4.8z"/></svg>继续听';
   card.replaceChildren(cover, info, btn);
   card.hidden = false;
+  $('shelfResume').hidden = false;
+}
+
+function renderReadingResume() {
+  const card = $('resumeReadCard');
+  const latest = books.reduce((current, book) => {
+    if (!book.lastRead || book.finished) return current;
+    return !current || book.lastRead > current.lastRead ? book : current;
+  }, null);
+  card.hidden = !latest;
+  if (!latest) {
+    card.replaceChildren();
+    return;
+  }
+  const percent = progressAt(latest.position, latest.length);
+  const cover = element('div', Array.from(latest.title)[0] || '书', 'resume-cover');
+  cover.dataset.tone = getBookTone(latest.id);
+  const info = element('div', null, 'resume-info');
+  info.append(element('span', '阅读断点', 'resume-label'), element('strong', latest.title, 'resume-title'),
+    element('span', `读到 ${percent}%`, 'resume-meta'));
+  card.replaceChildren(cover, info, button('继续读', () => openBook(latest), 'resume-btn'));
 }
 
 function renderShelf() {
   books.sort((a, b) => Math.max(b.lastRead || 0, b.ttsProgress?.updatedAt || 0, b.created || 0)
     - Math.max(a.lastRead || 0, a.ttsProgress?.updatedAt || 0, a.created || 0));
 
-  $('shelfCount').textContent = books.length ? `共 ${books.length} 本 · 本机私密书库` : '本地私密书库';
+  $('shelfCount').textContent = `${books.length} 本`;
   $('viewToggle').textContent = shelfView === 'grid' ? '列表' : '宫格';
+  $('viewToggle').setAttribute('aria-label', shelfView === 'grid' ? '切换到列表视图' : '切换到宫格视图');
   $('shelfTools').hidden = books.length === 0;
+  renderReadingResume();
   renderResumeCard();
 
   const query = shelfQuery.trim().toLowerCase();
   const filtered = books.filter(book => {
-    if (query && !book.title.toLowerCase().includes(query)) return false;
+    if (query && ![book.title, book.author].some(value => value?.toLowerCase().includes(query))) return false;
+    if (shelfFilter === 'reading') return Boolean(book.lastRead && !book.finished);
     if (shelfFilter === 'listened') return Boolean(book.ttsProgress);
     if (shelfFilter === 'finished') return Boolean(book.finished);
     return true;
@@ -137,24 +175,22 @@ function renderShelf() {
   if (books.length && !filtered.length) {
     list.replaceChildren(element('p', '没有符合条件的书籍。', 'shelf-empty-filter'));
   } else if (shelfView === 'grid') {
-    const cards = filtered.map((book, i) => {
+    const cards = filtered.map(book => {
       const card = element('div', null, 'book-card');
       const open = button(null, () => openBook(book), 'book-card-open');
-      const tone = i % 6;
       const hasAudio = Boolean(book.ttsProgress);
       const readPct = progressAt(book.position, book.length, book.finished);
       const displayPct = hasAudio ? (book.ttsProgress.percent ?? readPct) : readPct;
 
       const cover = element('div', null, 'book-cover-3d');
-      cover.dataset.tone = String(tone);
-      cover.append(
-        element('span', book.title, 'book-cover-title'),
-        element('span', hasAudio ? '🎧 听书' : 'TXT', `book-cover-tag${hasAudio ? ' is-audio' : ''}`),
-      );
+      cover.dataset.tone = getBookTone(book.id);
+      cover.setAttribute('aria-hidden', 'true');
+      cover.append(element('span', book.title, 'book-cover-title'));
+      if (book.author) cover.append(element('span', book.author, 'book-cover-author'));
       const name = element('span', book.title, 'book-card-name');
       const bar = element('span', null, 'book-mini-bar');
       const fill = element('span');
-      fill.style.width = `${displayPct}%`;
+      fill.style.width = `${book.finished ? 100 : displayPct}%`;
       bar.append(fill);
 
       const metaText = book.finished
@@ -174,19 +210,13 @@ function renderShelf() {
       return card;
     });
 
-    const addCard = button(null, () => $('fileInput').click(), 'add-book-card');
-    addCard.append(element('span', '＋'), element('span', '导入 TXT'));
-    cards.push(addCard);
-    const downloadCard = button(null, () => openDownload(), 'add-book-card dl-add-card');
-    downloadCard.append(element('span', '⇣'), element('span', '下载小说'));
-    cards.push(downloadCard);
     list.replaceChildren(...cards);
   } else {
-    list.replaceChildren(...filtered.map((book, i) => {
+    list.replaceChildren(...filtered.map(book => {
       const row = element('div', null, 'book-row');
       const open = button(null, () => openBook(book), 'book-open');
       const cover = element('span', Array.from(book.title)[0] || '书', 'book-cover');
-      cover.dataset.tone = String(i % 6);
+      cover.dataset.tone = getBookTone(book.id);
       cover.setAttribute('aria-hidden', 'true');
       const info = element('span', null, 'book-details');
       const hasAudio = Boolean(book.ttsProgress);
@@ -199,7 +229,7 @@ function renderShelf() {
       const meta = element('small', metaText, hasAudio && !book.finished ? 'is-audio' : '');
       const bar = element('span', null, 'book-mini-bar');
       const fill = element('span');
-      fill.style.width = `${hasAudio ? (book.ttsProgress.percent ?? readPct) : readPct}%`;
+      fill.style.width = `${book.finished ? 100 : hasAudio ? (book.ttsProgress.percent ?? readPct) : readPct}%`;
       bar.append(fill);
       info.append(element('strong', book.title), meta, bar);
       open.append(cover, info);
@@ -214,9 +244,8 @@ function renderShelf() {
       row.append(...children);
       return row;
     }));
-    list.append(button('⇣ 从番茄下载小说', () => openDownload(), 'dl-add-btn'));
   }
-  $('empty').hidden = books.some(book => book.id === SAMPLE.id);
+  $('empty').hidden = books.length > 0;
 }
 
 function openDialog(title, ...content) {
@@ -413,7 +442,8 @@ function closeReader() {
 }
 
 function setThemeColor() {
-  document.querySelector('meta[name="theme-color"]').content = getComputedStyle(document.body).getPropertyValue('--paper').trim();
+  const color = active ? getComputedStyle(document.body).getPropertyValue('--paper').trim() : '#f6f5ef';
+  document.querySelector('meta[name="theme-color"]').content = color;
 }
 
 function applySettings() {
@@ -1052,8 +1082,18 @@ function settings() {
 $('importBtn').onclick = () => $('fileInput').click();
 
 // 番茄小说下载：服务端取正文，这里只负责把结果落进本机书架。
-openDownload = setupDownload({
+setupDownload({
   findBookByRemote: remoteId => books.find(b => b.remoteId === remoteId) || null,
+  onShow: () => {
+    shelfScroll = window.scrollY;
+    $('library').hidden = true;
+    syncOrbVisibility();
+  },
+  onClose: () => {
+    $('library').hidden = false;
+    window.scrollTo(0, shelfScroll);
+    syncOrbVisibility();
+  },
   readText: id => readText(id),
   readDownloadRows,
   saveDownloadRows,
@@ -1073,10 +1113,16 @@ openDownload = setupDownload({
     delete book.textHash;
     book.length = text.length;
     if (book.position > text.length) book.position = text.length;
-    await addBook(book, text);
-    clearLocalDeleted(book.id);
-    if (existing) books = books.map(item => item.id === book.id ? book : item);
-    else books.push(book);
+    const writing = addBook(book, text);
+    shelfTextWrites.set(book.id, writing);
+    try {
+      await writing;
+      clearLocalDeleted(book.id);
+      if (existing) books = books.map(item => item.id === book.id ? book : item);
+      else books.push(book);
+    } finally {
+      shelfTextWrites.delete(book.id);
+    }
     saveMetaMirror(books);
     renderShelf();
     if (loadSyncKey()) {
@@ -1138,7 +1184,7 @@ for (const btn of $('shelfFilter').querySelectorAll('button')) {
   btn.onclick = () => {
     shelfFilter = btn.dataset.filter;
     for (const item of $('shelfFilter').querySelectorAll('button')) {
-      item.setAttribute('aria-selected', String(item === btn));
+      item.setAttribute('aria-pressed', String(item === btn));
     }
     renderShelf();
   };
@@ -1211,7 +1257,7 @@ function syncOrbVisibility() {
   const inReader = Boolean(active && !readerEl.hidden);
   const menuOpen = inReader && !$('readerMenus').hidden;
 
-  if (listenViewOpen) {
+  if (listenViewOpen || !$('downloadPage').hidden) {
     floatBtn.hidden = true;
     capsule.hidden = true;
     readerEl.classList.remove('tts-pick-mode');
@@ -1278,7 +1324,7 @@ function stepListenChapter(delta) {
 function renderListenView(state) {
   if (!listenViewOpen || !tts.active) return;
   const book = findListeningBook();
-  const title = book?.title || tts.bookTitle || '页灯听书';
+  const title = book?.title || tts.bookTitle || '小说阅读与听书';
   const tone = getBookTone(tts.bookId);
   const cover = $('listenCover');
   cover.textContent = Array.from(title)[0] || '书';
@@ -2076,7 +2122,7 @@ $('backupInput').onchange = async event => {
     toast(`已成功恢复 ${count} 本书及其阅读/听书进度！`);
     if (loadSyncKey()) runCloudSync({ silent: true });
   } catch (err) {
-    toast(`恢复失败：${err?.message || '请确认是页灯整库备份文件'}`);
+    toast(`恢复失败：${err?.message || '请确认选择的是整库备份文件'}`);
   }
 };
 

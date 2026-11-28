@@ -1,4 +1,4 @@
-// 页灯听书引擎：
+// 小说阅读与听书的朗读引擎
 // - 免费多角色智能分声（旁白+男女对话自动切换）
 // - 逐自然段精准切分、高亮与秒级断点续听
 // - 后台提前缓存 8 段 + 客户端多段 MP3 无缝拼轨（同轨内段间 0ms 卡顿，兼顾 iPhone 锁屏稳播）
@@ -483,7 +483,7 @@ export async function testTtsEndpoint(settings) {
 
   const sampleText = getActiveVoice(settings) === MULTI_ROLE_ID
     ? '夜色渐深，老周推开了门。“今天有你的新信。”她笑着接过信纸。'
-    : '页灯听书连接成功，祝你听书愉快。';
+    : '语音连接成功，祝你听书愉快。';
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 20000);
@@ -1255,9 +1255,9 @@ export class TtsController {
     const chunk = this.getCurrentChunk();
     try {
       navigator.mediaSession.metadata = new MediaMetadata({
-        title: chunk?.chapterTitle || this.bookTitle || '页灯听书',
-        artist: this.bookTitle || '页灯阅读器',
-        album: '页灯 · 听书',
+        title: chunk?.chapterTitle || this.bookTitle || '小说阅读与听书',
+        artist: this.bookTitle || '小说阅读与听书',
+        album: '小说阅读与听书',
         artwork: [
           { src: new URL('./icon-192.png', location.href).href, sizes: '192x192', type: 'image/png' },
           { src: new URL('./icon-512.png', location.href).href, sizes: '512x512', type: 'image/png' },

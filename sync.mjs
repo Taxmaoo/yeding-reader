@@ -480,7 +480,7 @@ export async function exportLibraryBackup(books, readText) {
   const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
   const link = document.createElement('a');
   link.href = url;
-  link.download = `页灯整库备份-${dateStr}.${ext}`;
+  link.download = `小说阅读与听书-整库备份-${dateStr}.${ext}`;
   document.body.append(link);
   link.click();
   link.remove();
@@ -494,7 +494,7 @@ export async function importLibraryBackup(file, existingBooks, putBook, readText
   const plainBytes = await gzipDecompressBytes(buf, isGzip ? 'gzip' : 'utf8');
   const parsed = JSON.parse(new TextDecoder('utf-8').decode(plainBytes));
   if (parsed?.format !== 'yeding-backup-v1' || !Array.isArray(parsed.books)) {
-    throw new Error('不是有效的页灯整库备份文件');
+    throw new Error('不是有效的整库备份文件');
   }
   const localMap = new Map(existingBooks.map(b => [b.id, b]));
   let restoredCount = 0;

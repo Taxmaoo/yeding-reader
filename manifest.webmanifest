@@ -1,12 +1,12 @@
 {
-  "name": "页灯 · TXT 阅读器",
-  "short_name": "页灯",
-  "description": "本地 TXT 小说阅读器",
+  "name": "小说阅读与听书",
+  "short_name": "小说阅读与听书",
+  "description": "导入和下载 TXT 小说，随时阅读与听书。",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
-  "background_color": "#f8f3e9",
-  "theme_color": "#f8f3e9",
+  "background_color": "#f6f5ef",
+  "theme_color": "#f6f5ef",
   "lang": "zh-CN",
   "icons": [
     { "src": "./icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },

@@ -29,6 +29,7 @@ let hooks = {
 let busy = false;
 let activeRunCancel = null;
 let currentTaskId = null;
+let notifyTasks = () => {};
 
 // ---------- 下载任务队列（本地持久化） ----------
 const TASKS_KEY = 'yeding-dl-tasks-v1';
@@ -48,6 +49,7 @@ function saveTasks(list) {
   try {
     localStorage.setItem(TASKS_KEY, JSON.stringify(list.slice(0, TASK_KEEP)));
   } catch {}
+  notifyTasks();
 }
 
 function updateTask(id, patch) {
@@ -100,7 +102,7 @@ function normalizeTasksOnLoad() {
   const list = loadTasks();
   let changed = false;
   for (const task of list) {
-    if (task.status === 'running' || task.status === 'pausing') {
+    if (task.status === 'running' || task.status === 'pausing' || task.status === 'queued') {
       task.status = 'paused';
       task.message = '页面已关闭，已暂停（点继续接着下）';
       changed = true;
@@ -111,7 +113,7 @@ function normalizeTasksOnLoad() {
 normalizeTasksOnLoad();
 
 function pendingCount() {
-  return loadTasks().filter(task => task.status === 'queued' || task.status === 'running' || task.status === 'pausing').length;
+  return loadTasks().filter(task => taskGroup(task) !== 'completed').length;
 }
 
 const $ = id => document.getElementById(id);
@@ -130,13 +132,37 @@ function button(text, action, className) {
   return node;
 }
 
+let panelRevision = 0;
+let downloadOpener;
+
 function openPanel(title, ...content) {
-  const dialog = $('dialog');
-  dialog.classList.remove('toc-sheet');
-  $('dialogTitle').textContent = title;
-  $('dialogBody').replaceChildren(...content.filter(Boolean));
-  $('dialogBody').scrollTop = 0;
-  if (!dialog.open) dialog.showModal();
+  const page = $('downloadPage');
+  if (page.hidden) {
+    downloadOpener = document.activeElement;
+    page.hidden = false;
+    hooks.onShow?.();
+  }
+  taskList = null;
+  const heading = element('h1', title, 'download-heading');
+  heading.tabIndex = -1;
+  $('downloadContent').replaceChildren(heading, ...content.filter(Boolean));
+  $('downloadExploreTab').setAttribute('aria-pressed', 'true');
+  $('downloadTasksTab').setAttribute('aria-pressed', 'false');
+  window.scrollTo(0, 0);
+  heading.focus({ preventScroll: true });
+  return ++panelRevision;
+}
+
+function closeDownload() {
+  const page = $('downloadPage');
+  if (page.hidden) return;
+  panelRevision++;
+  taskList = null;
+  page.hidden = true;
+  $('downloadContent').replaceChildren();
+  hooks.onClose?.();
+  const opener = downloadOpener && $('library').contains(downloadOpener) ? downloadOpener : $('downloadBtn');
+  opener?.focus({ preventScroll: true });
 }
 
 function readSetting(key, fallback = '') {
@@ -169,9 +195,9 @@ async function api(path, options = {}) {
   try {
     data = JSON.parse(text);
   } catch {
-    throw new Error('下载服务不可用：需要部署 Cloudflare Pages Functions 或填写自建代理地址。');
+    throw new Error('下载服务暂不可用，请稍后重试或检查下载设置。');
   }
-  if (!data.ok) throw new Error(data.error || '番茄接口返回异常');
+  if (!res.ok || !data?.ok) throw new Error(data?.error || '番茄接口返回异常');
   return data;
 }
 
@@ -182,7 +208,7 @@ function statusLine(text, tone = '') {
 }
 
 function actionRow(...buttons) {
-  const row = element('div', null, 'dialog-actions');
+  const row = element('div', null, 'dl-actions');
   row.append(...buttons);
   return row;
 }
@@ -201,254 +227,279 @@ function paceSelectElement() {
 
 // ---------- 面板：搜索 ----------
 const STATUS_TEXT = {
-  queued: '等待中', running: '下载中', pausing: '暂停中', paused: '已暂停',
-  stopped: '已停止', done: '已完成', error: '失败',
+  queued: '等待中', running: '下载中', pausing: '正在处理', paused: '已暂停', stopped: '已停止', done: '已完成', error: '失败',
 };
-let taskTimer = null;
+const TASK_FILTERS = [['all', '全部'], ['active', '进行中'], ['attention', '待处理'], ['completed', '已完成']];
+const search = { input: '', items: null, error: '', pending: false, request: 0 };
+let taskList;
+let taskFilter = 'all';
 
-function renderTaskList(box) {
-  const tasks = loadTasks();
-  if (!tasks.length) {
-    box.replaceChildren(element('p', '还没有下载任务。下过的书会出现在这里，可暂停 / 继续。', 'dl-hint'));
-    return;
-  }
-  box.replaceChildren(...tasks.map(task => {
-    const pct = task.total ? Math.round(task.done * 100 / task.total) : 0;
-    const status = STATUS_TEXT[task.status] || task.status;
-    const row = element('div', null, 'dl-task');
-    const info = element('div', null, 'dl-task-info');
-    info.append(...[
-      element('strong', task.title, 'dl-task-title'),
-      element('span', `${status} · 已取 ${task.done}/${task.total || '?'} 章${task.total ? ` · ${pct}%` : ''}`,
-        `dl-task-meta${task.status === 'done' ? ' is-ok' : task.status === 'error' ? ' is-warn' : ''}`),
-      task.message && task.status !== 'running' ? element('span', task.message, 'dl-task-msg') : null,
-    ].filter(Boolean));
-    const bar = element('div', null, 'dl-bar');
-    const fill = element('span');
+function taskGroup(task) {
+  if (task.status === 'queued' || task.status === 'running' || task.status === 'pausing') return 'active';
+  if (task.status === 'done' && !task.missing) return 'completed';
+  return 'attention';
+}
+
+function taskRow(task) {
+  const row = element('article', null, 'dl-task');
+  row.dataset.taskId = task.id;
+  const head = element('div', null, 'dl-task-head');
+  const title = element('strong', null, 'dl-task-title');
+  const badge = element('span', null, 'dl-task-badge');
+  head.append(title, badge);
+  const bar = element('div', null, 'dl-bar');
+  const fill = element('span');
+  bar.setAttribute('role', 'progressbar');
+  bar.setAttribute('aria-label', '下载进度');
+  bar.append(fill);
+  const meta = element('span', null, 'dl-task-meta');
+  const message = element('p', null, 'dl-task-msg');
+  const actions = element('div', null, 'dl-task-actions');
+  row.append(head, bar, meta, message, actions);
+
+  let actionState;
+  const update = next => {
+    const group = taskGroup(next);
+    const pct = next.total ? Math.max(0, Math.min(100, Math.round((next.done || 0) * 100 / next.total))) : 0;
+    row.dataset.group = group;
+    title.textContent = next.title;
+    badge.textContent = next.status === 'done' && next.missing ? '待补齐' : STATUS_TEXT[next.status] || next.status;
+    bar.hidden = !next.total;
     fill.style.width = `${pct}%`;
-    bar.append(fill);
+    bar.setAttribute('aria-valuenow', String(pct));
+    meta.textContent = next.total ? `${next.done || 0} / ${next.total} 章 · ${pct}%` : '';
+    meta.hidden = !next.total;
+    message.textContent = next.message || '';
+    message.hidden = !next.message;
 
-    const actions = element('div', null, 'dl-task-actions');
-    if (task.status === 'running') {
-      actions.append(button('暂停', () => { pauseTask(task.id); renderTaskList(box); }, 'secondary'));
-    } else if (task.status === 'done' && task.missing > 0) {
-      actions.append(button(`补漏（${task.missing} 章）`, async () => {
-        await resumeTask(task.id, null);
-        renderTaskList(box);
+    const nextActionState = `${next.status}:${next.missing || 0}`;
+    if (actionState === nextActionState) return;
+    actionState = nextActionState;
+    const controls = [];
+    if (next.status === 'running' || next.status === 'queued') {
+      controls.push(button('暂停', () => pauseTask(next.id), 'secondary'), button('停止', () => stopTask(next.id), 'dl-quiet'));
+    } else if (next.status === 'done' && next.missing) {
+      controls.push(button(`补齐 ${next.missing} 章`, () => resumeTask(next.id), 'primary'));
+    } else if (group === 'attention') {
+      controls.push(button(next.status === 'error' ? '重试' : '继续下载', () => resumeTask(next.id), 'primary'));
+    } else if (group === 'completed' && hooks.findBookByRemote?.(next.remoteId)) {
+      controls.push(button('开始阅读', () => {
+        const book = hooks.findBookByRemote(next.remoteId);
+        if (!book) return;
+        closeDownload();
+        hooks.openBook?.(book);
       }, 'secondary'));
-    } else if (task.status === 'queued' || task.status === 'paused' || task.status === 'stopped' || task.status === 'error') {
-      actions.append(button('继续', async () => {
-        await resumeTask(task.id, null);
-        renderTaskList(box);
-      }, 'secondary'));
-    } else if (task.status === 'pausing') {
-      actions.append(button('暂停中…', () => {}, 'secondary'));
     }
-    if (task.status !== 'running' && task.status !== 'pausing') {
-      actions.append(button('移除', () => { removeTask(task.id); renderTaskList(box); }, 'secondary'));
+    if (group !== 'active') {
+      const remove = button('移除任务', () => removeTask(next.id), 'dl-quiet');
+      remove.setAttribute('aria-label', `移除《${next.title}》的下载任务`);
+      controls.push(remove);
     }
-    row.append(info, bar, actions);
-    return row;
-  }));
-}
-
-function mountTaskList(box) {
-  renderTaskList(box);
-  if (taskTimer) clearInterval(taskTimer);
-  taskTimer = setInterval(() => {
-    if (!$('dialog').open || !document.body.contains(box)) {
-      clearInterval(taskTimer);
-      taskTimer = null;
-      return;
-    }
-    renderTaskList(box);
-  }, 1500);
-}
-
-/** 打开一个带进度容器的面板再启动任务：避免进度写进已被替换掉的旧容器。 */
-function startTaskPanel(title, taskLabel) {
-  const box = element('div', null, 'dl-download');
-  openPanel(taskLabel || '下载中', element('strong', title, 'dl-title'), box, actionRow(
-    button('下载任务', () => openTasksPanel(), 'secondary'),
-    button('关闭', () => { const d = $('dialog'); if (d.open) d.close(); }, 'secondary'),
-  ));
-  return box;
+    actions.replaceChildren(...controls);
+    actions.hidden = controls.length === 0;
+  };
+  update(task);
+  return { row, update };
 }
 
 function openTasksPanel() {
+  const filters = element('div', null, 'dl-task-filters');
+  filters.setAttribute('aria-label', '筛选下载任务');
   const box = element('div', null, 'dl-tasks');
-  renderTaskList(box);
-  mountTaskList(box);
-  openPanel('下载任务', box, actionRow(
-    button('去下载', () => openHome(), 'primary'),
-    button('关闭', () => { const d = $('dialog'); if (d.open) d.close(); }, 'secondary'),
-  ));
-}
-
-function openHome(message = '') {
-  const input = element('input', null, 'dl-input');
-  input.type = 'search';
-  input.placeholder = '书名、作者，或 fanqienovel.com/page/ 链接';
-  input.setAttribute('aria-label', '搜索番茄小说');
-
-  const warn = statusLine(message, message ? 'is-warn' : '');
-  const resultBox = element('div', null, 'dl-results');
-  const actions = element('div', null, 'dialog-actions');
-
-  const doSearch = async () => {
-    const q = input.value.trim();
-    if (!q) return input.focus();
-    resultBox.replaceChildren(statusLine('正在搜索…'));
-    actions.querySelectorAll('button').forEach(b => { b.disabled = true; });
-    try {
-      const idMatch = q.match(/(?:page|reader)\/(\d{6,})/) || q.match(/^(\d{6,})$/);
-      if (idMatch) {
-        await openBookPanel(idMatch[1]);
-        return;
-      }
-      const data = await api(`search?q=${encodeURIComponent(q)}&count=12`);
-      if (!data.items.length) {
-        resultBox.replaceChildren(statusLine('没有搜到这本书，换关键词或直接粘贴书籍链接试试。', 'is-warn'));
-      } else {
-        resultBox.replaceChildren(...data.items.map(item => bookRow(item)));
-      }
-    } catch (err) {
-      resultBox.replaceChildren(statusLine(err.message, 'is-warn'));
-    } finally {
-      actions.querySelectorAll('button').forEach(b => { b.disabled = false; });
+  const rows = new Map();
+  const empty = element('div', null, 'dl-empty');
+  const emptyText = element('p');
+  empty.append(emptyText, button('去找小说', () => openHome(), 'secondary'));
+  const render = () => {
+    const tasks = loadTasks();
+    const selected = tasks.filter(task => taskFilter === 'all' || taskGroup(task) === taskFilter);
+    const nodes = selected.map(task => {
+      if (!rows.has(task.id)) rows.set(task.id, taskRow(task));
+      else rows.get(task.id).update(task);
+      return rows.get(task.id).row;
+    });
+    if (!nodes.length) {
+      emptyText.textContent = tasks.length ? '这个分类暂无任务。' : '还没有下载任务。';
+      nodes.push(empty);
+    }
+    if (nodes.length !== box.children.length || nodes.some((node, index) => node !== box.children[index])) {
+      box.replaceChildren(...nodes);
     }
   };
-
-  function bookRow(item) {
-    const row = element('div', null, 'dl-book');
-    const info = element('div', null, 'dl-book-info');
-    const meta = [item.author && `作者 ${item.author}`, item.category, item.chapters && `${item.chapters} 章`, item.status]
-      .filter(Boolean).join(' · ');
-    info.append(
-      element('strong', item.title, 'dl-book-title'),
-      element('span', meta, 'dl-book-meta'),
-      item.abstract ? element('span', item.abstract, 'dl-book-abstract') : element('span', '', 'dl-book-abstract'),
-    );
-    const pick = button('查看 →', () => openBookPanel(item.id, item), 'dl-book-pick');
-    row.append(info, pick);
-    return row;
+  for (const [key, label] of TASK_FILTERS) {
+    const filter = button(label, () => {
+      taskFilter = key;
+      for (const child of filters.children) child.setAttribute('aria-pressed', String(child === filter));
+      render();
+    });
+    filter.setAttribute('aria-pressed', String(taskFilter === key));
+    filters.append(filter);
   }
+  openPanel('下载任务', filters, box);
+  $('downloadExploreTab').setAttribute('aria-pressed', 'false');
+  $('downloadTasksTab').setAttribute('aria-pressed', 'true');
+  taskList = { box, render };
+  render();
+}
 
-  input.addEventListener('keydown', event => {
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      doSearch();
+function bookSummary(title, meta, abstract, headingTag = 'h2') {
+  const summary = element('div', null, 'dl-book-summary');
+  const cover = element('div', Array.from(title)[0] || '书', 'dl-book-cover');
+  cover.setAttribute('aria-hidden', 'true');
+  const info = element('div', null, 'dl-book-info');
+  info.append(element(headingTag, title, 'dl-book-title'));
+  if (meta) info.append(element('p', meta, 'dl-book-meta'));
+  if (abstract) info.append(element('p', abstract, 'dl-book-abstract'));
+  summary.append(cover, info);
+  return summary;
+}
+
+function renderSearchResults(box) {
+  if (search.pending) return box.replaceChildren(statusLine('正在搜索…'));
+  if (search.error) return box.replaceChildren(statusLine(search.error, 'is-warn'));
+  if (!search.items) return box.replaceChildren();
+  if (!search.items.length) return box.replaceChildren(statusLine('没有找到小说。换个关键词，或直接输入书籍链接。'));
+  const rows = search.items.map(item => {
+    const row = element('article', null, 'dl-book');
+    const title = item.title || `书籍 ${item.id}`;
+    const meta = [item.author, item.category, item.chapters && `${item.chapters} 章`, item.status].filter(Boolean).join(' · ');
+    const pick = button('看目录', () => openBookPanel(item.id, item), 'dl-book-pick');
+    pick.setAttribute('aria-label', `查看《${title}》的目录`);
+    row.append(bookSummary(title, meta, item.abstract, 'h3'), pick);
+    return row;
+  });
+  box.replaceChildren(element('h2', `搜索结果（${rows.length}）`, 'dl-results-title'), ...rows);
+}
+
+function openHome() {
+  const intro = element('div', null, 'dl-search-card');
+  const form = element('form', null, 'dl-search-form');
+  form.setAttribute('role', 'search');
+  const input = element('input', null, 'dl-input');
+  input.type = 'search';
+  input.placeholder = '书名、作者、番茄链接或书籍 ID';
+  input.setAttribute('aria-label', '搜索番茄小说');
+  input.value = search.input;
+  const submit = element('button', '搜索', 'primary');
+  submit.type = 'submit';
+  const results = element('div', null, 'dl-results');
+  results.setAttribute('aria-live', 'polite');
+  input.addEventListener('input', () => { search.input = input.value; });
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const query = input.value.trim();
+    if (!query) return input.focus();
+    const id = (query.match(/(?:page|reader)\/(\d{6,})/) || query.match(/^(\d{6,})$/))?.[1];
+    if (id) { await openBookPanel(id); return; }
+    const revision = ++search.request;
+    search.pending = true;
+    search.error = '';
+    renderSearchResults(results);
+    try {
+      const data = await api(`search?q=${encodeURIComponent(query)}&count=12`);
+      if (revision === search.request) search.items = Array.isArray(data.items) ? data.items : [];
+    } catch (error) {
+      if (revision === search.request) search.error = error.message;
+    } finally {
+      if (revision === search.request) {
+        search.pending = false;
+        renderSearchResults($('downloadSearchResults') || results);
+      }
     }
   });
-
-  actions.append(
-    button('搜索', doSearch, 'primary'),
-    button('打开链接', () => {
-      const q = input.value.trim();
-      const idMatch = q.match(/(?:page|reader)\/(\d{6,})/) || q.match(/^(\d{6,})$/);
-      if (!idMatch) {
-        input.focus();
-        warn.textContent = '先粘贴 fanqienovel.com/page/ 开头的书籍链接。';
-        warn.className = 'dl-status is-warn';
-        return;
-      }
-      openBookPanel(idMatch[1]);
-    }),
-    button('账号 Cookie / 代理', openAdvanced, 'secondary'),
-  );
-
-  openPanel('下载番茄小说', warn, input, actions, resultBox,
-    element('p', '把番茄上的小说抓到本机书架。已在书架里的书再次打开会走「继续下载 / 更新」，只补新章和上次失败的章。', 'dl-hint'),
-    actionRow(button(`下载任务（${pendingCount()}）`, () => openTasksPanel(), 'secondary')));
-  input.focus({ preventScroll: true });
+  results.id = 'downloadSearchResults';
+  form.append(input, submit);
+  intro.append(element('p', '在番茄找小说，下载后可以离线阅读。'), form);
+  renderSearchResults(results);
+  openPanel('找小说', intro, results);
 }
 
 function openAdvanced() {
+  const settings = element('div', null, 'dl-section');
   const cookie = element('textarea', null, 'dl-input dl-textarea');
+  cookie.id = 'downloadCookie';
   cookie.value = readSetting(COOKIE_KEY);
-  cookie.placeholder = '可选：从 fanqienovel.com 登录后复制整段 Cookie，含 sessionid / s_v_web_id';
-  cookie.setAttribute('aria-label', '番茄账号 Cookie');
-
+  cookie.spellcheck = false;
   const proxy = element('input', null, 'dl-input');
+  proxy.id = 'downloadProxy';
   proxy.type = 'url';
   proxy.value = readSetting(PROXY_KEY);
-  proxy.placeholder = '可选：自建代理根地址，例如 https://fanqie.example.workers.dev';
-  proxy.setAttribute('aria-label', '自建代理地址');
-
+  proxy.placeholder = 'https://你的代理地址';
+  const cookieLabel = element('label', '账号 Cookie（可选）', 'dl-label');
+  cookieLabel.htmlFor = cookie.id;
+  const proxyLabel = element('label', '自建代理地址（可选）', 'dl-label');
+  proxyLabel.htmlFor = proxy.id;
   const save = () => {
+    if (!proxy.reportValidity()) return;
     writeSetting(COOKIE_KEY, cookie.value.trim());
     writeSetting(PROXY_KEY, proxy.value.trim());
-    hooks.toast?.('下载设置已保存在本机');
+    hooks.toast?.('下载设置已保存');
     openHome();
   };
-
-  openPanel('下载设置',
-    element('label', '账号 Cookie（可选）', 'dl-label'),
-    cookie,
-    element('label', '自建代理地址（可选）', 'dl-label'),
-    proxy,
-    element('p', 'Cookie 只保存在这台设备的浏览器里，请求时以 X-Fanqie-Cookie 头转发给服务端，不写入仓库。', 'dl-hint'),
-    actionRow(button('保存', save, 'primary'), button('返回', () => openHome(), 'secondary')));
+  settings.append(cookieLabel, element('p', 'Cookie 保存在本机，下载请求会交给当前使用的服务。', 'dl-hint'), cookie, proxyLabel, proxy,
+    actionRow(button('保存设置', save, 'primary'), button('取消', () => openHome(), 'secondary')));
+  openPanel('下载设置', settings);
 }
 
-// ---------- 面板：书籍 ----------
 async function openBookPanel(bookId, seed = null) {
-  openPanel('读取目录…', statusLine('正在拉取书籍信息与章节列表…'));
-  let book;
+  const requested = openPanel(seed?.title || '书籍详情', statusLine('正在读取目录…'));
+  let catalog;
   try {
     const data = await api(`book?id=${encodeURIComponent(bookId)}`);
-    book = data.book;
-  } catch (err) {
-    openPanel('读取失败', statusLine(err.message, 'is-warn'), statusLine('确认书籍链接有效，或稍后重试。'));
+    catalog = data.book;
+  } catch (error) {
+    if (requested === panelRevision) openPanel('目录读取失败', statusLine(error.message, 'is-warn'),
+      actionRow(button('重试', () => openBookPanel(bookId, seed), 'primary'), button('返回搜索', () => openHome(), 'secondary')));
     return;
   }
-  if (!book.chapters.length) {
-    openPanel('这本书没有目录', statusLine('番茄接口没有返回章节，可能链接指向的不是书籍页。', 'is-warn'));
+  if (requested !== panelRevision) return;
+  if (!catalog?.chapters?.length) {
+    openPanel('没有找到目录', statusLine('请确认书籍链接，或从搜索结果中选择另一本。'), button('返回搜索', () => openHome(), 'secondary'));
     return;
   }
-
   const existing = hooks.findBookByRemote?.(bookId) || null;
-  if (existing) {
-    openResumePanel({ bookId, catalog: book, existing, seed });
-    return;
-  }
-  openFreshPanel({ bookId, catalog: book, seed });
+  if (existing) openResumePanel({ bookId, catalog, existing, seed });
+  else openFreshPanel({ bookId, catalog, seed });
+}
+
+function enqueueDownload(options) {
+  writeSetting(PACE_KEY, options.pace);
+  createTask(options);
+  taskFilter = 'all';
+  openTasksPanel();
+  return pumpQueue();
+}
+
+function controlRow(label, input) {
+  const row = element('label', null, 'dl-row');
+  row.append(element('span', label, 'dl-row-label'), input);
+  return row;
 }
 
 function openFreshPanel({ bookId, catalog, seed }) {
-  const all = catalog.chapters;
-  const cap = Math.min(all.length, MAX_CHAPTERS);
+  const cap = Math.min(catalog.chapters.length, MAX_CHAPTERS);
   const title = catalog.title || seed?.title || `书籍 ${bookId}`;
-  const meta = [catalog.author && `作者 ${catalog.author}`, catalog.category, `${all.length} 章`].filter(Boolean).join(' · ');
+  const meta = [catalog.author || seed?.author, catalog.category, `${catalog.chapters.length} 章`].filter(Boolean).join(' · ');
   const pace = paceSelectElement();
-
   const limitInput = element('input', null, 'dl-limit');
-  limitInput.type = 'number';
-  limitInput.min = '1';
-  limitInput.max = String(Math.max(1, cap));
-  limitInput.value = String(cap);
-  limitInput.setAttribute('aria-label', '下载章节数量');
-
-  const minutes = Math.max(1, Math.round(cap / BATCH * (PACE[pace.value].delay + PAGE_OVERHEAD) / 1000 / 60));
-  const body = element('div', null, 'dl-download');
-  const start = button(`下载 ${cap} 章`, async () => {
-    const limit = Math.max(1, Math.min(cap, Number(limitInput.value) || cap));
-    writeSetting(PACE_KEY, pace.value);
-    const task = createTask({ remoteId: bookId, title, mode: 'fresh', pace: pace.value, limit });
-    await pumpQueue(body, task.id);
-  }, 'primary');
-
-  const limitRow = element('div', null, 'dl-row');
-  limitRow.append(element('span', '只下载前', 'dl-row-label'), limitInput, element('span', '章（填全部章数即整本）', 'dl-row-label'));
-  const paceRow = element('div', null, 'dl-row');
-  paceRow.append(element('span', '节奏', 'dl-row-label'), pace);
-
-  openPanel('下载到书架',
-    element('strong', title, 'dl-title'),
-    element('span', meta, 'dl-meta'),
-    catalog.abstract ? element('p', catalog.abstract, 'dl-abstract') : null,
-    statusLine(`共 ${all.length} 章，默认整本下载（约 ${minutes} 分钟）。被限流时会自动放慢并更换设备身份续抓；取不到的章节会在正文里标注，事后可「继续下载」补回。`),
-    limitRow, paceRow, actionRow(start, button('下载任务', () => openTasksPanel(), 'secondary')), body);
+  Object.assign(limitInput, { type: 'number', min: '1', max: String(cap), step: '1', value: String(cap), inputMode: 'numeric' });
+  const limit = () => Math.max(1, Math.min(cap, Math.floor(Number(limitInput.value) || cap)));
+  const estimate = element('p', null, 'dl-hint');
+  const start = button('', () => enqueueDownload({ remoteId: bookId, title, mode: 'fresh', pace: pace.value, limit: limit() }), 'primary');
+  const update = () => {
+    const minutes = Math.max(1, Math.round(limit() / BATCH * (PACE[pace.value].delay + PAGE_OVERHEAD) / 60000));
+    start.textContent = limit() === catalog.chapters.length ? '下载整本' : `下载前 ${limit()} 章`;
+    estimate.textContent = `预计约 ${minutes} 分钟。下载任务可以随时暂停和继续。`;
+  };
+  limitInput.oninput = update;
+  pace.onchange = update;
+  update();
+  const details = element('div', null, 'dl-detail');
+  details.append(bookSummary(title, meta, catalog.abstract || seed?.abstract));
+  const options = element('div', null, 'dl-section');
+  options.append(controlRow('下载前多少章', limitInput), controlRow('下载节奏', pace), estimate,
+    actionRow(start, button('返回搜索', () => openHome(), 'secondary')));
+  openPanel('下载到书架', details, options);
 }
 
 function countManifestDrift(manifest, chapters) {
@@ -456,89 +507,45 @@ function countManifestDrift(manifest, chapters) {
 }
 
 function openResumePanel({ bookId, catalog, existing, seed }) {
-  const dl = existing.dl || null;
-  const manifest = Array.isArray(dl?.manifest) ? dl.manifest : [];
+  const hasManifest = Array.isArray(existing.dl?.manifest);
+  const manifest = hasManifest ? existing.dl.manifest : [];
   const have = new Set(manifest.map(entry => entry.id));
-  const missing = catalog.chapters.filter(chapter => !have.has(chapter.id));
-  const failed = manifest.filter(entry => entry.ok === false);
-  const title = catalog.title || existing.title || seed?.title || `书籍 ${bookId}`;
-  const meta = [catalog.author && `作者 ${catalog.author}`, `${catalog.chapters.length} 章`].filter(Boolean).join(' · ');
-  const pace = paceSelectElement();
-  const body = element('div', null, 'dl-download');
-
-  if (!Array.isArray(dl?.manifest)) {
-    // 旧版本下载的书没有章节清单，只能整本重下（覆盖正文，保留阅读进度与书签）
-    openPanel('这本书是旧版下载的',
-      statusLine('《' + title + '》没有章节清单，无法只补新章。可以让它重新拉取整本并替换正文（阅读进度、书签保留）。', 'is-warn'),
-      actionRow(button('重新下载整本', async () => {
-        writeSetting(PACE_KEY, pace.value);
-        const box = startTaskPanel(title, '重新下载整本');
-        const task = createTask({ remoteId: bookId, title, mode: 'replace', pace: pace.value, replace: true });
-        await pumpQueue(box, task.id);
-      }, 'primary'), button('取消', () => openHome(), 'secondary')));
-    return;
-  }
-
-  // 章序自检：正文里第 i 条应当正好是目录第 i+1 章。
-  // 只要出现「位置漂移」或「跳章」，说明这本书的正文是旧版本按错误偏移拼出来的，增量补只会越补越乱。
+  const newCount = catalog.chapters.filter(chapter => !have.has(chapter.id)).length;
+  const failedCount = manifest.filter(entry => entry.ok === false).length;
   const drift = countManifestDrift(manifest, catalog.chapters);
-  const catalogIds = new Set(catalog.chapters.map(chapter => chapter.id));
-  const unknown = manifest.filter(entry => !catalogIds.has(entry?.id)).length;
-  const allUnknown = manifest.length > 0 && unknown === manifest.length;
-  const broken = drift > 0;
-
-  const uptoDate = missing.length === 0 && failed.length === 0 && !broken;
-  const start = button(
-    broken
-      ? '章序异常，先重新下载整本'
-      : (uptoDate ? '已是最新（重新核对）' : `继续下载（${missing.length} 新章${failed.length ? ` + 补 ${failed.length} 章` : ''}）`),
-    async () => {
-      if (broken) {
-        openPanel('先修复这本书',
-          statusLine(`检测到 ${drift} 处章序异常：正文里的第 N 条不是目录第 N 章。继续增量补章会把它拼得更乱。`, 'is-warn'),
-          statusLine('建议点「重新下载整本」：会按目录顺序重抓正文，阅读进度和书签保留。'),
-          actionRow(button('重新下载整本', async () => {
-            writeSetting(PACE_KEY, pace.value);
-            const box = startTaskPanel(title, '重新下载整本');
-            const fixTask = createTask({ remoteId: bookId, title, mode: 'replace', pace: pace.value, replace: true });
-            await pumpQueue(box, fixTask.id);
-          }, 'primary'), button('返回', () => openResumePanel({ bookId, catalog, existing: { ...existing }, seed }), 'secondary')));
-        return;
-      }
-      writeSetting(PACE_KEY, pace.value);
-      const task = createTask({ remoteId: bookId, title, mode: 'update', pace: pace.value });
-      await pumpQueue(body, task.id);
-    },
-    broken ? 'secondary' : 'primary',
-  );
-
-  const paceRow = element('div', null, 'dl-row');
-  paceRow.append(element('span', '节奏', 'dl-row-label'), pace);
-
-  openPanel('继续下载 / 更新',
-    element('strong', title, 'dl-title'),
-    element('span', meta, 'dl-meta'),
-    statusLine(`已存 ${manifest.length} 章 · 目录共 ${catalog.chapters.length} 章 · 新增 ${missing.length} 章`
-      + (failed.length ? ` · 上次失败 ${failed.length} 章` : '')
-      + (uptoDate ? ' · 已经是最新' : ''),
-    uptoDate ? 'is-ok' : ''),
-    broken
-      ? statusLine(allUnknown
-        ? `⚠ 这本书的章节清单与当前目录完全对不上（${unknown} 章全部失效），大概率是旧版本留下的残档。请点「重新下载整本」按目录顺序重抓。`
-        : `⚠ 检测到章序异常 ${drift} 处${unknown ? `（其中 ${unknown} 章已不在目录里）` : ''}：正文第 N 条不是目录第 N 章，继续增量补只会更乱，请先「重新下载整本」。`, 'is-warn')
-      : null,
-    paceRow,
-    actionRow(start, button('下载任务', () => openTasksPanel(), 'secondary'), button('重新下载整本', () => {
-      openPanel('重新下载整本？',
-        statusLine('会用番茄上的最新内容替换这本书的正文，阅读进度和书签保留。', 'is-warn'),
-        actionRow(button('确认替换', async () => {
-          writeSetting(PACE_KEY, pace.value);
-          const box = startTaskPanel(title, '重新下载整本');
-          const task = createTask({ remoteId: bookId, title, mode: 'replace', pace: pace.value, replace: true });
-          await pumpQueue(box, task.id);
-        }, 'primary'), button('取消', () => openHome(), 'secondary')));
-    }, 'secondary')),
-    body);
+  const title = catalog.title || existing.title || seed?.title || `书籍 ${bookId}`;
+  const meta = [catalog.author || existing.author, `目录 ${catalog.chapters.length} 章`].filter(Boolean).join(' · ');
+  const pace = paceSelectElement();
+  const details = element('div', null, 'dl-detail');
+  details.append(bookSummary(title, meta));
+  const options = element('div', null, 'dl-section');
+  if (hasManifest) {
+    const stats = element('dl', null, 'dl-stats');
+    const saved = manifest.filter(entry => entry.ok !== false && !entry.skipped).length;
+    for (const [label, count] of [['已下载', saved], ['新章节', newCount], ['待补齐', failedCount]]) {
+      const stat = element('div');
+      stat.append(element('dt', label), element('dd', String(count)));
+      stats.append(stat);
+    }
+    details.append(stats);
+  }
+  if (!hasManifest || drift) {
+    options.append(statusLine(hasManifest ? '目录次序有变，请重新下载整本。' : '这本书的旧版本缺少章节清单，需要重新下载整本。', 'is-warn'));
+  }
+  const replace = button('重新下载整本', () => {
+    openPanel('重新下载整本', statusLine(`《${title}》的新正文下载完整后才会替换原书。`),
+      actionRow(button('确认下载', () => enqueueDownload({ remoteId: bookId, title, mode: 'replace', pace: pace.value, replace: true }), 'primary'),
+        button('返回', () => openResumePanel({ bookId, catalog, existing, seed }), 'secondary')));
+  }, hasManifest && !drift ? 'secondary' : 'primary');
+  const controls = [replace];
+  if (hasManifest && !drift && (newCount || failedCount)) {
+    controls.unshift(button(newCount ? '下载更新' : '补齐缺章', () => enqueueDownload({ remoteId: bookId, title, mode: 'update', pace: pace.value }), 'primary'));
+  } else if (hasManifest && !drift) {
+    options.append(statusLine('已经是最新。', 'is-ok'));
+  }
+  controls.push(button('返回搜索', () => openHome(), 'dl-quiet'));
+  options.append(controlRow('下载节奏', pace), actionRow(...controls));
+  openPanel('继续下载 / 更新', details, options);
 }
 
 // ---------- 下载 ----------
@@ -579,7 +586,7 @@ function patchEntry(text, manifest, index, block, ok) {
 }
 
 async function runDownload({
-  bookId, catalog, existing, textBefore, container, title, author, chapters, retryFailed = [], pace, replacement, task,
+  bookId, catalog, existing, textBefore, title, author, chapters, retryFailed, pace, replacement, task, already,
 }) {
   if (busy) return;
   busy = true;
@@ -591,28 +598,11 @@ async function runDownload({
     if (reason && !stopReason) stopReason = reason;
   };
   const indexOf = new Map(catalog.chapters.map((chapter, index) => [chapter.id, index]));
-  container = container || document.createElement('div');
-  container.replaceChildren();
-
-  const bar = element('div', null, 'dl-bar');
-  const fill = element('span');
-  bar.append(fill);
-  const log = statusLine('准备下载…');
-  const pauseBtn = button('暂停', () => requestStop('pause'), 'secondary dl-cancel');
-  const cancel = button('停止', () => requestStop('stop'), 'secondary dl-cancel');
-  container.append(log, bar, actionRow(pauseBtn, cancel));
-
-  // 关掉面板 = 停止这次下载（已取到的章照常保存），避免 busy 一直挂着
-  const dialogEl = $('dialog');
-  const onDialogClose = () => requestStop('stop');
-  activeRunCancel = reason => requestStop(reason || 'stop');
-  currentTaskId = task?.id || null;
-  dialogEl.addEventListener('close', onDialogClose);
+  activeRunCancel = requestStop;
+  currentTaskId = task.id;
 
   const rows = [];
-  let failedCount = 0;
   let delay = pace.delay;
-  let rotations = 0;
   const startedAt = Date.now();
   const saveReplacementRows = async page => {
     if (!replacement) return;
@@ -634,17 +624,11 @@ async function runDownload({
   const total = chapters.length + retryFailed.length;
   let done = 0;
   const tick = extra => {
-    fill.style.width = `${total ? Math.round(done * 100 / total) : 0}%`;
     const elapsed = (Date.now() - startedAt) / 1000;
     const eta = done > 0 ? Math.round(elapsed / done * (total - done) / 60) : 0;
-    const tail = [failedCount ? `${failedCount} 章被拒重试中` : '', rotations ? `换设备 ${rotations} 次` : ''].filter(Boolean).join('，');
-    log.textContent = `已取 ${done} / ${total} 章${eta > 0 ? ` · 约剩 ${eta} 分钟` : ''}${tail ? ` · ${tail}` : ''}${extra ? ` · ${extra}` : ''}`;
-    if (task) {
-      task.done = done;
-      task.total = total;
-      task.message = log.textContent;
-      updateTask(task.id, { done, total, message: task.message, status: 'running' });
-    }
+    const ready = replacement ? replacement.rows.size : already + rows.filter(row => row.ok || BOILERPLATE.test(row.title || '')).length;
+    const message = cancelled ? '正在保存已取章节…' : [extra, eta > 0 ? `预计还需 ${eta} 分钟` : ''].filter(Boolean).join(' · ');
+    updateTask(task.id, { done: ready, message });
   };
 
   try {
@@ -658,7 +642,7 @@ async function runDownload({
         rows.push({ id: entry.id, ok: false, reason: 'network', title: entry.title, text: '' });
       }
       done += 1;
-      tick('补旧章');
+      tick('正在补齐缺章');
       await sleep(Math.min(delay, 500));
     }
 
@@ -683,7 +667,6 @@ async function runDownload({
         const wantFresh = attempt >= 2 && pageNo - lastRotatePage >= 10;
         if (wantFresh) {
           lastRotatePage = pageNo;
-          rotations += 1;
         }
 
         let page = [];
@@ -714,10 +697,7 @@ async function runDownload({
       const ordered = slice.map(chapter => got.get(chapter.id) || {
         id: chapter.id, title: chapter.title, ok: false, reason: 'network', text: '',
       });
-      for (const row of ordered) {
-        rows.push(row);
-        if (!row.ok) failedCount += 1;
-      }
+      rows.push(...ordered);
       await saveReplacementRows(ordered);
       done += slice.length;
       tick();
@@ -731,7 +711,7 @@ async function runDownload({
       for (let round = 0; round < waits.length && !cancelled; round += 1) {
         const failed = rows.filter(row => !row.ok);
         if (!failed.length) break;
-        log.textContent = `补漏第 ${round + 1}/${waits.length} 轮：${failed.length} 章待补，先等 ${Math.round(waits[round] / 1000)}s…`;
+        updateTask(task.id, { message: `正在重试 ${failed.length} 个缺章，稍候…` });
         await sleep(waits[round]);
         for (let i = 0; i < failed.length; i += BATCH) {
           if (cancelled) break;
@@ -753,33 +733,27 @@ async function runDownload({
         }
         if (!rows.some(row => !row.ok)) break;
       }
-      failedCount = rows.filter(row => !row.ok).length;
-      tick('补漏完成');
+      tick('重试结束');
     }
 
     if (replacement) {
       const missing = replacement.ids.size - replacement.rows.size;
       if (cancelled || missing) {
-        log.textContent = `替换进度已保存（${replacement.rows.size}/${replacement.ids.size} 章），原正文已保留。`;
-        log.className = 'dl-status is-warn';
-        updateTask(task.id, { missing, message: log.textContent });
+        updateTask(task.id, { missing, message: '已保存重下进度，原正文保留。' });
         return;
       }
       rows.splice(0, rows.length, ...replacement.chapters.map(chapter => replacement.rows.get(chapter.id)));
     } else if (total === 0) {
-      log.textContent = '这本书已经是最新的了。';
-      log.className = 'dl-status is-ok';
-      updateTask(task.id, { done: 0, missing: 0, message: log.textContent });
+      updateTask(task.id, { missing: 0, message: '这本书已经是最新。' });
       return;
     }
     if (!rows.length) {
-      log.textContent = cancelled ? '已停止，已取的章节会保留。' : '没有取到任何章节，稍后再试。';
-      log.className = 'dl-status is-warn';
+      updateTask(task.id, { message: cancelled ? '已保留现有下载进度。' : '没有取到任何章节，请稍后重试。' });
       return;
     }
 
     // ③ 组装：替换模式重排全书，否则在原文后面追加 + 就地补旧章
-    log.textContent = '整理正文…';
+    updateTask(task.id, { message: '正在保存到书架…' });
     const byId = new Map(rows.map(row => [row.id, row]));
     const manifest = replacement ? [] : (existing?.dl?.manifest || []).map(entry => ({ ...entry }));
     let text = textBefore;
@@ -814,7 +788,7 @@ async function runDownload({
     // 自检：写入条目数应当等于「本轮真正取到的章数」（模板章也算一条），暂停/停止时不报警
     const expected = rows.length - patched;
     const overflow = Math.max(0, expected - appended.entries.length);
-    const saved = await hooks.upsertBook({
+    await hooks.upsertBook({
       title,
       author: author || catalog.author,
       remoteId: bookId,
@@ -827,42 +801,33 @@ async function runDownload({
       },
     });
     if (replacement) await hooks.clearDownloadRows(task.id).catch(() => {});
-    fill.style.width = '100%';
-    log.textContent = [
+    const message = [
       replacement
         ? '已用最新内容替换全书'
-        : (okCount ? `已加入书架：${okCount} 章正文` : '没有新增正文'),
+        : (okCount || patched ? '已保存到书架' : '没有新增正文'),
+      task.mode === 'update' && okCount ? `新增 ${okCount} 章` : '',
       patched ? `补回旧章 ${patched} 章` : '',
       skippedCount ? `跳过模板章 ${skippedCount} 个` : '',
       stillMissing ? `${stillMissing} 章仍失败（可再次继续下载）` : '',
       overflow > 0 ? `⚠ ${overflow} 章未能写入（请再点一次继续下载）` : '',
       cancelled ? (stopReason === 'pause' ? '（已暂停，进度已保存）' : '（已按停止保存）') : '',
     ].filter(Boolean).join('，') + '。';
-    log.className = 'dl-status is-ok';
-    if (task) updateTask(task.id, { added: okCount, missing: stillMissing, message: log.textContent });
-    container.append(actionRow(button('开始阅读', () => { if (saved) hooks.openBook?.(saved); }, 'primary')));
+    updateTask(task.id, { added: okCount, missing: stillMissing, message });
   } catch (err) {
     status = 'error';
-    log.textContent = err.message || '下载中断';
-    log.className = 'dl-status is-warn';
-    if (task) updateTask(task.id, { status: 'error', message: log.textContent });
+    updateTask(task.id, { message: err.message || '下载中断' });
   } finally {
     busy = false;
     activeRunCancel = null;
     currentTaskId = null;
-    dialogEl.removeEventListener('close', onDialogClose);
-    cancel.remove();
-    pauseBtn.remove();
-    if (task) {
-      if (status !== 'error' && cancelled) status = stopReason === 'pause' ? 'paused' : 'stopped';
-      updateTask(task.id, { status });
-    }
+    if (status !== 'error' && cancelled) status = stopReason === 'pause' ? 'paused' : 'stopped';
+    updateTask(task.id, { status });
   }
 }
 
 // ---------- 任务执行 ----------
-async function startTask(task, container = null) {
-  updateTask(task.id, { status: 'running', message: '读取目录…' });
+async function startTask(task) {
+  updateTask(task.id, { status: 'running', message: '正在读取目录…' });
   try {
     const { book: catalog } = await api(`book?id=${encodeURIComponent(task.remoteId)}`);
     if (!catalog?.chapters?.length) throw new Error('目录为空，请稍后重试');
@@ -894,13 +859,14 @@ async function startTask(task, container = null) {
     }
     if (loadTasks().find(item => item.id === task.id)?.status !== 'running') return;
     const chapters = target.filter(chapter => !have.has(chapter.id));
-    updateTask(task.id, { total: chapters.length + retryFailed.length, done: 0 });
+    const retryIds = new Set(retryFailed.map(entry => entry.id));
+    const already = target.filter(chapter => have.has(chapter.id) && !retryIds.has(chapter.id)).length;
+    updateTask(task.id, { total: already + chapters.length + retryFailed.length, done: already, message: '' });
     await runDownload({
       bookId: task.remoteId,
       catalog,
       existing,
       textBefore,
-      container,
       title: catalog.title || task.title,
       author: catalog.author,
       chapters,
@@ -908,25 +874,23 @@ async function startTask(task, container = null) {
       pace: PACE[task.pace] || PACE.normal,
       replacement,
       task,
+      already,
     });
   } catch (err) {
     const message = err.message || '下载准备失败';
-    updateTask(task.id, { status: 'error', message });
-    container?.replaceChildren(statusLine(message, 'is-warn'));
+    if (loadTasks().find(item => item.id === task.id)?.status === 'running') updateTask(task.id, { status: 'error', message });
   }
 }
 
 let pumping = false;
-async function pumpQueue(container = null, focusId = null) {
+async function pumpQueue() {
   if (pumping) return;
   pumping = true;
   try {
     for (;;) {
       const next = loadTasks().find(task => task.status === 'queued');
       if (!next) break;
-      const target = focusId && next.id === focusId ? container : null;
-      await startTask(next, target);
-      focusId = null;
+      await startTask(next);
     }
   } finally {
     pumping = false;
@@ -934,17 +898,26 @@ async function pumpQueue(container = null, focusId = null) {
 }
 
 export function pauseTask(id) {
+  interruptTask(id, 'pause');
+}
+
+function stopTask(id) {
+  interruptTask(id, 'stop');
+}
+
+function interruptTask(id, reason) {
   const task = loadTasks().find(item => item.id === id);
   if (!task) return;
+  const isPause = reason === 'pause';
   if (task.status === 'running' && currentTaskId === id) {
-    activeRunCancel?.('pause');
-    updateTask(id, { status: 'pausing', message: '正在暂停…' });
+    activeRunCancel?.(reason);
+    updateTask(id, { status: 'pausing', message: isPause ? '正在暂停…' : '正在停止…' });
   } else {
-    updateTask(id, { status: 'paused', message: '已暂停' });
+    updateTask(id, { status: isPause ? 'paused' : 'stopped', message: isPause ? '已暂停' : '已停止' });
   }
 }
 
-export async function resumeTask(id, container = null) {
+export async function resumeTask(id) {
   const task = loadTasks().find(item => item.id === id);
   if (!task) return;
   updateTask(id, { status: 'queued', message: '等待继续' });
@@ -952,18 +925,35 @@ export async function resumeTask(id, container = null) {
     hooks.toast?.('已加入队列，等当前任务结束后自动开始');
     return;
   }
-  await pumpQueue(container, id);
+  await pumpQueue();
 }
 
 // ---------- 对外入口 ----------
 export function setupDownload(options = {}) {
   hooks = { ...hooks, ...options };
-  const trigger = $('downloadBtn');
-  const open = async () => {
-    openHome();
+  for (const [id, handler] of Object.entries({
+    downloadBtn: openHome, downloadExploreTab: openHome, downloadTasksBtn: openTasksPanel, downloadTasksTab: openTasksPanel,
+    downloadBack: closeDownload, downloadSettingsBtn: openAdvanced,
+  })) {
+    const control = $(id);
+    if (control) control.onclick = handler;
+  }
+  $('downloadPage')?.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !event.defaultPrevented) closeDownload();
+  });
+  notifyTasks = () => {
+    const count = pendingCount();
+    for (const id of ['shelfTaskCount', 'downloadTaskCount']) {
+      const badge = $(id);
+      if (!badge) continue;
+      badge.textContent = String(count);
+      badge.setAttribute('aria-label', `${count} 项未完成`);
+      badge.hidden = count === 0;
+    }
+    if (taskList?.box.isConnected) taskList.render();
   };
-  if (trigger) trigger.onclick = open;
-  return open;
+  notifyTasks();
+  return openHome;
 }
 
 /** 供书架「⋯ → 继续下载 / 更新」调用：按书籍 ID 直接走更新流程。 */

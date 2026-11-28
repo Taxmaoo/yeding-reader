@@ -3,57 +3,87 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-  <meta name="theme-color" content="#f8f3e9">
+  <meta name="theme-color" content="#f6f5ef">
   <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="小说阅读与听书">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
-  <title>页灯 · TXT 小说阅读器</title>
-  <link rel="manifest" href="./manifest.webmanifest">
+  <title>小说阅读与听书</title>
+  <link rel="manifest" href="./manifest.webmanifest?v=41">
   <link rel="icon" href="./icon-192.png">
   <link rel="apple-touch-icon" href="./apple-touch-icon.png">
-  <link rel="stylesheet" href="./styles.css?v=40">
-  <script type="module" src="./app.mjs?v=40"></script>
+  <link rel="stylesheet" href="./styles.css?v=41">
+  <script type="module" src="./app.mjs?v=41"></script>
 </head>
 <body>
   <div id="library" class="library">
     <header class="brand">
       <div class="brand-left">
-        <img src="./icon-192.png" alt="" width="34" height="34">
+        <img src="./icon-192.png" alt="" width="38" height="38">
         <div class="brand-title">
-          <strong>页灯书架</strong>
-          <span id="shelfCount" class="shelf-count">本地私密书库</span>
+          <strong>小说阅读与听书</strong>
         </div>
       </div>
       <div class="brand-actions">
         <button id="cloudSyncBtn" class="pill-btn cloud-sync-btn" type="button" aria-label="私人云书库与备份"><span class="sync-dot" aria-hidden="true"></span><span id="cloudSyncLabel">云备份</span></button>
-        <button id="viewToggle" class="pill-btn" type="button" aria-label="切换书架视图">列表</button>
-        <button id="downloadBtn" class="pill-btn dl-trigger" type="button" aria-label="下载番茄小说">⤓ 下载</button>
-        <button id="importBtn" class="primary pill-primary" type="button">＋ 导入 TXT</button>
         <input id="fileInput" type="file" accept=".txt,text/plain" hidden>
         <input id="backupInput" type="file" accept=".gz,.json,application/gzip,application/json" hidden>
       </div>
     </header>
     <main class="shelf">
-      <section id="resumeListenCard" class="resume-card" aria-label="上次听书记录" hidden></section>
+      <section class="shelf-overview" aria-labelledby="shelfTitle">
+        <div class="shelf-heading">
+          <h1 id="shelfTitle">我的书架</h1>
+          <span id="shelfCount" class="shelf-count"></span>
+        </div>
+        <div class="shelf-actions" aria-label="添加和下载">
+          <button id="importBtn" class="shelf-action shelf-import" type="button"><span aria-hidden="true">＋</span>导入 TXT</button>
+          <button id="downloadBtn" class="shelf-action dl-trigger dl-add-card dl-add-btn" type="button"><span aria-hidden="true">↓</span>下载小说</button>
+          <button id="downloadTasksBtn" class="shelf-action shelf-tasks" type="button">下载任务<span id="shelfTaskCount" class="task-count" hidden></span></button>
+        </div>
+      </section>
+
+      <div id="shelfResume" class="shelf-resume" hidden>
+        <section id="resumeReadCard" class="resume-card resume-read" aria-label="继续阅读" hidden></section>
+        <section id="resumeListenCard" class="resume-card resume-listen" aria-label="继续听书" hidden></section>
+      </div>
 
       <div id="shelfTools" class="shelf-tools" hidden>
-        <input id="shelfSearch" class="shelf-search" type="search" placeholder="搜索书架里的书…" aria-label="搜索书架">
-        <div id="shelfFilter" class="shelf-filter" role="tablist" aria-label="书架筛选">
-          <button type="button" data-filter="all" aria-selected="true">全部</button>
-          <button type="button" data-filter="listened" aria-selected="false">听过</button>
-          <button type="button" data-filter="finished" aria-selected="false">已读完</button>
+        <div id="shelfFilter" class="shelf-filter" role="group" aria-label="书架筛选">
+          <button type="button" data-filter="all" aria-pressed="true">全部</button>
+          <button type="button" data-filter="reading" aria-pressed="false">在读</button>
+          <button type="button" data-filter="listened" aria-pressed="false">听过</button>
+          <button type="button" data-filter="finished" aria-pressed="false">已读完</button>
+        </div>
+        <div class="shelf-tools-end">
+          <input id="shelfSearch" class="shelf-search" type="search" placeholder="搜索书架" aria-label="搜索书架">
+          <button id="viewToggle" class="pill-btn" type="button" aria-label="切换书架视图">列表</button>
         </div>
       </div>
 
       <div id="bookList" class="book-list" data-view="grid"></div>
 
       <section id="empty" class="empty">
-        <div class="sample-cover" aria-hidden="true"><span>山里的<br>邮局</span><span class="cover-mark">页灯</span></div>
-        <div><h2>先听一篇样章</h2><p>试试多角色听书、翻页和夜间模式。</p><button id="sampleBtn" type="button">阅读《山里的邮局》 →</button></div>
+        <div class="sample-cover" aria-hidden="true"><span>山里的<br>邮局</span></div>
+        <div><h2>书架还是空的</h2><p>导入本机小说、从番茄下载，或先读一篇样章。</p><button id="sampleBtn" type="button">阅读《山里的邮局》 <span aria-hidden="true">→</span></button></div>
       </section>
       <p id="offlineStatus" class="storage-note" role="status" hidden></p>
-      <p class="storage-note">点右上角「云备份」可生成专属同步码防丢书（每位用户完全隔离不互通），也支持整库离线备份。</p>
     </main>
   </div>
+
+  <section id="downloadPage" class="downloads" aria-label="小说下载" hidden>
+    <header class="download-header">
+      <div class="download-bar">
+        <button id="downloadBack" class="download-link" type="button"><span aria-hidden="true">‹</span> 书架</button>
+        <strong>小说下载</strong>
+        <button id="downloadSettingsBtn" class="download-link" type="button">下载设置</button>
+      </div>
+      <nav class="download-tabs" aria-label="下载页面">
+        <button id="downloadExploreTab" type="button" aria-pressed="true">找小说</button>
+        <button id="downloadTasksTab" type="button" aria-pressed="false">下载任务<span id="downloadTaskCount" class="task-count" hidden></span></button>
+      </nav>
+    </header>
+    <main id="downloadContent" class="download-content"></main>
+  </section>
 
   <!-- 纯净阅读页（图 1） -->
   <section id="reader" class="reader" aria-label="小说阅读器" hidden>

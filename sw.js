@@ -2,19 +2,19 @@
 
 const SCOPE = new URL(self.registration.scope);
 // 发布静态资源的任何变更时递增版本号；不同部署目录互不清理缓存。
-const VERSION = 'v40';
+const VERSION = 'v41';
 const CACHE_PREFIX = `yeding-reader:${encodeURIComponent(SCOPE.href)}:`;
 const CACHE_NAME = `${CACHE_PREFIX}${VERSION}`;
 const STATIC_URLS = new Set([
   './',
-  'styles.css?v=40',
-  'app.mjs?v=40',
-  'reader-core.mjs?v=40',
-  'storage.mjs?v=40',
-  'tts.mjs?v=40',
-  'sync.mjs?v=40',
-  'download.mjs?v=40',
-  'manifest.webmanifest',
+  'styles.css?v=41',
+  'app.mjs?v=41',
+  'reader-core.mjs?v=41',
+  'storage.mjs?v=41',
+  'tts.mjs?v=41',
+  'sync.mjs?v=41',
+  'download.mjs?v=41',
+  'manifest.webmanifest?v=41',
   'icon-192.png',
   'icon-512.png',
   'apple-touch-icon.png',
