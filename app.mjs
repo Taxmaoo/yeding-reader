@@ -1,21 +1,21 @@
-import { DEFAULT_SETTINGS, SAMPLE, decodeTxt, indexText, sectionAt, progressAt, isLowSurrogate } from './reader-core.mjs?v=38';
+import { DEFAULT_SETTINGS, SAMPLE, decodeTxt, indexText, sectionAt, progressAt, isLowSurrogate } from './reader-core.mjs?v=21';
 import {
-  listBooks, readText, saveBook, addBook, putBook, deleteBook,
+  listBooks, listTextIds, readText, saveBook, addBook, putBook, deleteBook,
   saveMetaMirror, requestPersistentStorage,
-} from './storage.mjs?v=38';
+} from './storage.mjs?v=21';
 import {
   TtsController, EDGE_VOICES, SLEEP_OPTIONS,
   testTtsEndpoint, resolveApiEndpoint, loadLastListened, saveLastListened,
-} from './tts.mjs?v=38';
+} from './tts.mjs?v=21';
 import {
   generateSyncKey, validateSyncKey, loadSyncKey, saveSyncKey, loadLastSyncTime,
   markLocalDeleted, clearLocalDeleted, checkCloudStatus, pushBookMeta,
-  uploadBookFull, syncAllBooks, scheduleMetaSync, flushMetaSync,
+  uploadBookFull, recoverBookTextFromCloud, syncAllBooks, scheduleMetaSync, flushMetaSync,
   exportLibraryBackup, importLibraryBackup,
-} from './sync.mjs?v=38';
-import { setupDownload, openUpdateForBook } from './download.mjs?v=38';
+} from './sync.mjs?v=21';
 
-const APP_VERSION = 'v38';
+const APP_VERSION = 'v21';
+
 const $ = id => document.getElementById(id);
 const viewport = $('viewport');
 const passage = $('passage');
@@ -29,7 +29,6 @@ let resizeFrame;
 let importBusy = false;
 let touch;
 let lastSwipe = 0;
-let openDownload = () => {};
 
 function element(tag, text, className) {
   const node = document.createElement(tag);
@@ -176,9 +175,6 @@ function renderShelf() {
     const addCard = button(null, () => $('fileInput').click(), 'add-book-card');
     addCard.append(element('span', '＋'), element('span', '导入 TXT'));
     cards.push(addCard);
-    const downloadCard = button(null, () => openDownload(), 'add-book-card dl-add-card');
-    downloadCard.append(element('span', '⇣'), element('span', '下载小说'));
-    cards.push(downloadCard);
     list.replaceChildren(...cards);
   } else {
     list.replaceChildren(...filtered.map((book, i) => {
@@ -213,7 +209,6 @@ function renderShelf() {
       row.append(...children);
       return row;
     }));
-    list.append(button('⇣ 从番茄下载小说', () => openDownload(), 'dl-add-btn'));
   }
   $('empty').hidden = books.some(book => book.id === SAMPLE.id);
 }
@@ -257,12 +252,6 @@ function bookActions(book) {
     items.push(button('🎧 开始听这本书', () => {
       dialog.close();
       openBookAndListen(book);
-    }, 'dialog-item'));
-  }
-  if (book.remoteId) {
-    items.push(button('⇣ 继续下载 / 更新', () => {
-      dialog.close();
-      openUpdateForBook(book.remoteId, book.title);
     }, 'dialog-item'));
   }
   items.push(
@@ -324,7 +313,7 @@ async function importBuffer(file, buffer, encoding) {
     if (loadSyncKey()) {
       uploadBookFull(book, text)
         .then(() => { updateCloudBtnState(); toast(`《${book.title}》已同步至私人云书库`); })
-        .catch(() => {});
+        .catch(() => { toast(`《${book.title}》云备份暂未成功，点「云备份 → 立即同步」可重试`); });
     }
     await openBook(book, text);
   } catch {
@@ -352,7 +341,17 @@ async function openBook(book, supplied) {
   if (opening || active) return;
   opening = true;
   try {
-    const text = supplied ?? await readText(book.id);
+    let text = supplied ?? await readText(book.id);
+    if (!text && loadSyncKey()) {
+      toast(`正在从私人云书库补回《${book.title}》正文…`);
+      try {
+        text = await recoverBookTextFromCloud(book.id);
+        if (text) {
+          book.length = text.length;
+          await putBook(book, text);
+        }
+      } catch {}
+    }
     if (!text) throw new Error('missing text');
     const { chapters, sections, hasHeadings } = indexText(text);
     active = { book, text, chapters, sections, hasHeadings, sectionIndex: -1, spans: [], page: 0 };
@@ -456,7 +455,10 @@ function spanAt(offset) {
 }
 
 function charRect(span, index) {
-  const node = span.node.firstChild;
+  const node = span?.node?.firstChild;
+  if (!node || typeof node.data !== 'string' || !node.data.length) {
+    return span?.node?.getBoundingClientRect?.() || viewport.getBoundingClientRect();
+  }
   const text = node.data;
   let at = Math.min(text.length - 1, Math.max(0, index));
   if (isLowSurrogate(text.charCodeAt(at)) && at > 0) at--;
@@ -471,6 +473,7 @@ function columnOf(rect) {
 }
 
 function pageCount() {
+  if (!active?.spans?.length) return 1;
   return columnOf(charRect(active.spans.at(-1), Infinity)) + 1;
 }
 
@@ -730,11 +733,7 @@ function toc(initialTab = 'toc') {
     dialog.close();
     setMenu(false);
     jumpTo(position);
-    if (tts.active && tts.bookId === book.id && listenViewOpen) {
-      tts.seekToOffset(position);
-    } else {
-      viewport.focus({ preventScroll: true });
-    }
+    if (!listenViewOpen) viewport.focus({ preventScroll: true });
   };
 
   // 顶部书籍头卡（番茄同款：封面 + 书名 + 字数 + 搜全文 + 关闭）
@@ -982,39 +981,6 @@ function bookmarks() {
   }));
 }
 
-function versionRow() {
-  const row = element('div', null, 'dialog-actions');
-  const label = element('span', `当前版本 ${APP_VERSION}`, 'storage-note');
-  row.append(label, button('检查更新', async event => {
-    const btn = event.currentTarget;
-    btn.disabled = true;
-    btn.textContent = '检查中…';
-    try {
-      const reg = await navigator.serviceWorker?.getRegistration();
-      if (reg) await reg.update();
-      const res = await fetch('./sw.js?ts=' + Date.now(), { cache: 'no-store' });
-      const text = await res.text();
-      const remote = /VERSION = '(v\d+)'/.exec(text)?.[1] || '未知';
-      if (remote !== APP_VERSION) {
-        label.textContent = `发现新版本 ${remote}，正在刷新…`;
-        const regs = await navigator.serviceWorker?.getRegistrations() || [];
-        await Promise.all(regs.map(r => r.unregister()));
-        const keys = await caches.keys();
-        await Promise.all(keys.map(k => caches.delete(k)));
-        setTimeout(() => location.reload(true), 600);
-        return;
-      }
-      label.textContent = `当前版本 ${APP_VERSION}（已是最新）`;
-    } catch {
-      label.textContent = '检查更新失败，请检查网络';
-    } finally {
-      btn.disabled = false;
-      btn.textContent = '检查更新';
-    }
-  }, 'secondary'));
-  return row;
-}
-
 function settings() {
   const { book } = active;
   function change(key, value) {
@@ -1059,46 +1025,10 @@ function settings() {
   openDialog('阅读设置', choices('翻页方式', 'mode', [['page', '左右翻页'], ['scroll', '上下滚动']]),
     choices('背景', 'theme', [['white', '纸白'], ['paper', '暖纸'], ['green', '护眼'], ['night', '夜间']]),
     choices('字体', 'font', [['serif', '宋体'], ['sans', '系统字体']]), range('字号', 'size', 16, 32, 1, ' px'),
-    range('行距', 'leading', 1.4, 2.4, .1, ''), range('页边距', 'margin', 14, 40, 2, ' px'),
-    versionRow());
+    range('行距', 'leading', 1.4, 2.4, .1, ''), range('页边距', 'margin', 14, 40, 2, ' px'));
 }
 
 $('importBtn').onclick = () => $('fileInput').click();
-
-// 番茄小说下载：服务端取正文，这里只负责把结果落进本机书架。
-openDownload = setupDownload({
-  // 按 remoteId 找书架上已有的书，用于「继续下载 / 更新」
-  findBookByRemote: remoteId => books.find(b => b.remoteId === remoteId) || null,
-  readText: id => readText(id),
-  // 新书入库 / 老书增量合并都走这里
-  upsertBook: async ({ title, author, remoteId, text, dl }) => {
-    const existing = books.find(b => b.remoteId === remoteId) || null;
-    const book = existing || makeBook(
-      globalThis.crypto?.randomUUID?.() ?? `book-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      String(title || '未命名小说').trim(),
-      text,
-    );
-    if (author) book.author = author;
-    book.remoteId = remoteId;
-    book.source = 'fanqie';
-    book.dl = dl;
-    book.length = text.length;
-    if (book.position > text.length) book.position = text.length;
-    await addBook(book, text);
-    clearLocalDeleted(book.id);
-    if (!existing) books.push(book);
-    saveMetaMirror(books);
-    renderShelf();
-    if (loadSyncKey()) {
-      uploadBookFull(book, text)
-        .then(() => { updateCloudBtnState(); toast(`《${book.title}》已同步至私人云书库`); })
-        .catch(() => {});
-    }
-    return book;
-  },
-  openBook: book => openBook(book),
-  toast,
-});
 $('fileInput').onchange = event => {
   const file = event.currentTarget.files?.[0];
   event.currentTarget.value = '';
@@ -1235,15 +1165,17 @@ function syncOrbVisibility() {
     return;
   }
 
-  floatBtn.hidden = true;
   if (!inReader) {
+    floatBtn.hidden = true;
     capsule.classList.remove('in-reader-menu');
     capsule.hidden = false;
     readerEl.classList.remove('tts-pick-mode');
   } else {
+    const sameBook = active.book.id === tts.bookId;
+    floatBtn.hidden = !(menuOpen && !sameBook);
     capsule.classList.toggle('in-reader-menu', menuOpen);
     capsule.hidden = !menuOpen;
-    readerEl.classList.toggle('tts-pick-mode', menuOpen && active.book.id === tts.bookId);
+    readerEl.classList.toggle('tts-pick-mode', menuOpen && sameBook);
   }
 }
 
@@ -1855,6 +1787,7 @@ async function runCloudSync({ silent = false, onStatus } = {}) {
     const summary = await syncAllBooks({
       books,
       readText,
+      listTextIds,
       putBook,
       saveBook,
       deleteLocalBook: deleteBook,
@@ -2035,7 +1968,40 @@ function openVaultDialog(revealKey = false) {
   );
   localSec.append(localActions);
 
-  openDialog('书籍防丢与云备份', statusBox, cloudSec, localSec);
+function versionRow() {
+  const row = element('div', null, 'dialog-actions');
+  const label = element('span', `当前版本 ${APP_VERSION}`, 'storage-note');
+  row.append(label, button('检查更新', async event => {
+    const btn = event.currentTarget;
+    btn.disabled = true;
+    btn.textContent = '检查中…';
+    try {
+      const reg = await navigator.serviceWorker?.getRegistration();
+      if (reg) await reg.update();
+      const res = await fetch(`./sw.js?ts=${Date.now()}`, { cache: 'no-store' });
+      const text = await res.text();
+      const remote = /VERSION = '(v\d+)'/.exec(text)?.[1] || '未知';
+      if (remote !== APP_VERSION) {
+        label.textContent = `发现新版本 ${remote}，正在刷新…`;
+        const regs = await navigator.serviceWorker?.getRegistrations() || [];
+        await Promise.all(regs.map(r => r.unregister()));
+        const keys = await caches.keys();
+        await Promise.all(keys.map(k => caches.delete(k)));
+        setTimeout(() => location.reload(), 600);
+        return;
+      }
+      label.textContent = `当前版本 ${APP_VERSION}（已是最新）`;
+    } catch {
+      label.textContent = '检查更新失败，请检查网络';
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '检查更新';
+    }
+  }, 'secondary'));
+  return row;
+}
+
+  openDialog('书籍防丢与云备份', statusBox, cloudSec, localSec, versionRow());
 }
 
 $('cloudSyncBtn').onclick = () => openVaultDialog(false);
@@ -2091,30 +2057,25 @@ if ('serviceWorker' in navigator && window.isSecureContext) {
   offlineStatus.textContent = '正在准备离线阅读…';
   workers.ready.then(() => { offlineStatus.textContent = '✓ 已可离线阅读'; });
   workers.register('./sw.js').then(reg => {
-    const check = () => {
-      if (reg.installing?.state === 'redundant') unavailable();
-    };
+    const check = () => { if (reg.installing?.state === 'redundant') unavailable(); };
     if (reg.installing) {
       reg.installing.addEventListener('statechange', check);
       check();
     }
-    // 新版本接管后自动刷新一次，避免手机 PWA 长期停在旧缓存（首次安装不刷新）
     const hadController = Boolean(workers.controller);
     let reloading = false;
     workers.addEventListener('controllerchange', () => {
       if (!hadController || reloading) return;
-      if (document.querySelector('.dl-cancel')) {
-        toast('新版本已就绪，下载结束后刷新即可');
+      if (tts.active || active) {
+        toast('新版本已就绪，听完/退出阅读后刷新即可生效');
         return;
       }
       reloading = true;
       location.reload();
     });
-    // 回到前台时顺带查一次更新（iOS 主屏 PWA 恢复不会自动检查）
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden) reg.update().catch(() => {});
     });
-    setInterval(() => { reg.update().catch(() => {}); }, 5 * 60 * 1000);
   }).catch(unavailable);
 } else {
   offlineStatus.textContent = '请用 HTTPS 网站地址安装并开启离线阅读。';

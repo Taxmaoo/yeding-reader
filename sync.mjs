@@ -254,11 +254,21 @@ export async function downloadBookText(bookId, chunkCount, encoding = 'gzip') {
   return new TextDecoder('utf-8').decode(plainBytes);
 }
 
+export async function recoverBookTextFromCloud(bookId) {
+  const key = loadSyncKey();
+  if (!key || !bookId) return null;
+  const remoteRes = await syncFetch('/api/sync/books', key, { method: 'GET' });
+  const remote = (remoteRes.books || []).find(r => r.bookId === bookId && !r.deleted && r.hasText && r.chunkCount > 0);
+  if (!remote) return null;
+  return downloadBookText(bookId, remote.chunkCount, remote.encoding);
+}
+
 let syncInFlight = null;
 
 export async function syncAllBooks({
   books,
   readText,
+  listTextIds,
   putBook,
   saveBook,
   deleteLocalBook,
@@ -271,13 +281,16 @@ export async function syncAllBooks({
   syncInFlight = (async () => {
     const summary = { downloaded: 0, uploaded: 0, merged: 0, deleted: 0 };
     onStatus?.('正在连接私人云书库…');
-    const remoteRes = await syncFetch('/api/sync/books', key, { method: 'GET' });
+    const [remoteRes, localTextIds] = await Promise.all([
+      syncFetch('/api/sync/books', key, { method: 'GET' }),
+      typeof listTextIds === 'function' ? listTextIds().catch(() => null) : Promise.resolve(null),
+    ]);
     const remoteList = Array.isArray(remoteRes.books) ? remoteRes.books : [];
     const remoteMap = new Map(remoteList.map(r => [r.bookId, r]));
     const localMap = new Map(books.map(b => [b.id, b]));
     const deletedMap = loadDeletedMap();
 
-    // 1) 处理云端书籍：拉取本机缺失的书、合并共有书籍、执行云端删除
+    // 1) 处理云端书籍：拉取本机缺失的书/缺失正文、同步增量更新的正文、合并进度、执行删除
     for (const remote of remoteList) {
       const local = localMap.get(remote.bookId);
       const localDelTs = Number(deletedMap[remote.bookId] || 0);
@@ -309,6 +322,21 @@ export async function syncAllBooks({
         summary.downloaded++;
       } else {
         const merged = mergeBookMeta(local, remote.meta);
+        const localHasText = localTextIds ? localTextIds.has(local.id) : true;
+        const remoteLen = Number(remote.meta?.length || 0);
+        const localLen = Number(local.length || 0);
+
+        // 本机元数据存在但正文被系统回收，或云端正文比本机更新（如其他设备追加了新章节）-> 从云端补回/更新正文
+        if (remote.hasText && remote.chunkCount > 0 && (!localHasText || remoteLen > localLen)) {
+          onStatus?.(`正在补全《${merged.title}》正文…`);
+          const text = await downloadBookText(remote.bookId, remote.chunkCount, remote.encoding);
+          merged.length = text.length;
+          await putBook(merged, text);
+          localMap.set(merged.id, merged);
+          summary.downloaded++;
+          continue;
+        }
+
         const localChanged = JSON.stringify(merged) !== JSON.stringify(local);
         const remoteChanged = JSON.stringify(merged) !== JSON.stringify(remote.meta);
         if (localChanged) {
@@ -316,10 +344,13 @@ export async function syncAllBooks({
           localMap.set(merged.id, merged);
           summary.merged++;
         }
-        if (!remote.hasText) {
+
+        // 云端尚未存正文，或本机正文比云端更长（如刚追加了章节）-> 重新上传完整正文
+        if (!remote.hasText || (localHasText && localLen > remoteLen)) {
           const text = await readText(local.id);
           if (typeof text === 'string' && text.length) {
             onStatus?.(`正在备份《${merged.title}》…`);
+            merged.length = text.length;
             await uploadBookFull(merged, text);
             summary.uploaded++;
           }

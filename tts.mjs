@@ -572,11 +572,12 @@ export class TtsController {
         this.#schedulePrefetch(this.chunkIndex);
       }
 
-      // 2) 接近本轨末尾或锁屏回绕时无缝切换至已拼好的下一轨
+      // 2) 接近本轨末尾或锁屏回绕时无缝切换至已拼好的下一轨（按倍速自适应提前余量，避免 1.5x/2.0x 回跳重读）
+      const rate = Math.max(0.5, Number(this.audio.playbackRate) || Number(this.settings.rate) || 1.0);
       const effectiveDur = Number.isFinite(duration) && duration > 0 ? duration : this.track.totalSec;
-      const endMargin = Math.min(0.32, Math.max(0.15, effectiveDur * 0.08));
+      const endMargin = Math.min(0.7, Math.max(0.22, 0.28 * rate));
       const nearEnd = effectiveDur > 0.4 && (effectiveDur - currentTime) <= endMargin;
-      const wrapped = this.lastTime > 0.45 && currentTime < this.lastTime - 0.3;
+      const wrapped = this.lastTime > Math.max(0.45, effectiveDur * 0.5) && currentTime < this.lastTime - 0.3;
       this.lastTime = currentTime;
       if (nearEnd || wrapped) {
         this.#advanceToNextTrack({ auto: true });
@@ -639,8 +640,14 @@ export class TtsController {
       this.#clearAllCaches();
       if (this.active && this.chunkIndex >= 0) {
         const shouldResume = this.playing || this.loading;
-        this.#stopCurrentPlayback();
-        if (shouldResume) this.#playFromChunk(this.chunkIndex, { fromUser: true, fastStart: true });
+        if (shouldResume && this.settings.engine === 'api') {
+          // 保持静音保活而不是 audio.load() 释放会话，防止 iPhone 切音色触发 NotAllowedError
+          this.#enterSilentKeepAlive();
+          this.#playFromChunk(this.chunkIndex, { fromUser: true, fastStart: true });
+        } else {
+          this.#stopCurrentPlayback();
+          if (shouldResume) this.#playFromChunk(this.chunkIndex, { fromUser: true, fastStart: true });
+        }
       }
     } else if (this.active) {
       if (this.settings.engine === 'api') {
@@ -748,7 +755,7 @@ export class TtsController {
       return;
     }
     if (this.settings.engine === 'api') {
-      if (this.audio.src && !this.inKeepAlive && this.audio.readyState >= 2) {
+      if (this.audio.src && !this.inKeepAlive && !this.audio.error && this.audio.readyState >= 2) {
         try {
           this.playing = true;
           this.#applyPlaybackRate();
