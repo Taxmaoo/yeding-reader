@@ -103,8 +103,15 @@ export async function requestPersistentStorage() {
 export const listBooks = () => transaction('books', 'readonly', tx => tx.objectStore('books').getAll());
 export const listTextIds = async () => {
   const keys = await transaction('texts', 'readonly', tx => tx.objectStore('texts').getAllKeys());
-  return new Set(keys || []);
+  return new Set((keys || []).filter(key => typeof key === 'string'));
 };
+const downloadRange = id => IDBKeyRange.bound(['download', id], ['download', id, []], true, true);
+export const readDownloadRows = id => transaction('texts', 'readonly', tx => tx.objectStore('texts').getAll(downloadRange(id)));
+export const saveDownloadRows = (id, rows) => transaction('texts', 'readwrite', tx => {
+  const store = tx.objectStore('texts');
+  for (const row of rows) store.put(row, ['download', id, String(row.id)]);
+});
+export const clearDownloadRows = id => transaction('texts', 'readwrite', tx => tx.objectStore('texts').delete(downloadRange(id)));
 export const readText = id => transaction('texts', 'readonly', tx => tx.objectStore('texts').get(id));
 export const saveBook = book => transaction('books', 'readwrite', tx => tx.objectStore('books').put(book));
 export const addBook = (book, text) => transaction(['books', 'texts'], 'readwrite', tx => {

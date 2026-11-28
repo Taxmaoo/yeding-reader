@@ -27,14 +27,35 @@ export function decodeTxt(buffer, encoding = 'auto') {
   return text;
 }
 
-export function indexText(text) {
+function downloadedHeadings(text, manifest) {
+  if (!Array.isArray(manifest)) return [];
   const headings = [];
-  for (const match of text.matchAll(/^[ \t\u3000]*\S[^\n]{0,69}$/gm)) {
-    if (match[0].includes('\n')) continue;
-    const title = match[0].trim();
-    if (HEADING.test(title) && !/[。！？!?；;]$/.test(title)) {
-      const start = match.index;
-      headings.push({ title, start, headingEnd: Math.min(text.length, start + match[0].length + 1) });
+  let previousEnd = 0;
+  for (const entry of manifest) {
+    if (entry?.skipped) continue;
+    const { start, end } = entry || {};
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < previousEnd || end <= start || end > text.length) return [];
+    if (text.slice(previousEnd, start).trim()) return [];
+    const newline = text.indexOf('\n', start);
+    if (newline < 0 || newline >= end) return [];
+    const title = text.slice(start, newline).trim();
+    if (!HEADING.test(title)) return [];
+    headings.push({ title, start, headingEnd: newline + 1 });
+    previousEnd = end;
+  }
+  return text.slice(previousEnd).trim() ? [] : headings;
+}
+
+export function indexText(text, manifest) {
+  const headings = downloadedHeadings(text, manifest);
+  if (!headings.length) {
+    for (const match of text.matchAll(/^[ \t\u3000]*\S[^\n]{0,69}$/gm)) {
+      if (match[0].includes('\n')) continue;
+      const title = match[0].trim();
+      if (HEADING.test(title) && !/[。！？!?；;]$/.test(title)) {
+        const start = match.index;
+        headings.push({ title, start, headingEnd: Math.min(text.length, start + match[0].length + 1) });
+      }
     }
   }
   const chapters = headings.slice();

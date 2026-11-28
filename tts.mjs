@@ -465,6 +465,17 @@ function buildTtsRequestBody(text, settings) {
   };
 }
 
+async function requestSpeech(endpoint, text, settings, headers, signal) {
+  const body = buildTtsRequestBody(text, settings);
+  const send = payload => fetch(endpoint, { method: 'POST', headers, signal, body: JSON.stringify(payload) });
+  const response = await send(body);
+  if (!settings.apiUrl?.trim() || getActiveVoice(settings) !== MULTI_ROLE_ID || ![400, 422].includes(response.status)) {
+    return response;
+  }
+  await response.body?.cancel().catch(() => {});
+  return send({ model: 'tts-1', input: text, voice: 'alloy', response_format: 'mp3', speed: 1.0 });
+}
+
 export async function testTtsEndpoint(settings) {
   const endpoint = resolveApiEndpoint(settings.apiUrl);
   const headers = { 'Content-Type': 'application/json' };
@@ -477,12 +488,7 @@ export async function testTtsEndpoint(settings) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 20000);
   try {
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers,
-      signal: controller.signal,
-      body: JSON.stringify(buildTtsRequestBody(sampleText, settings)),
-    });
+    const response = await requestSpeech(endpoint, sampleText, settings, headers, controller.signal);
     if (!response.ok) {
       const detail = await response.text().catch(() => '');
       throw new Error(`HTTP ${response.status}${detail ? `: ${detail.slice(0, 120)}` : ''}`);
@@ -755,7 +761,8 @@ export class TtsController {
       return;
     }
     if (this.settings.engine === 'api') {
-      if (this.audio.src && !this.inKeepAlive && !this.audio.error && this.audio.readyState >= 2) {
+      if (this.track && this.audio.src === this.track.blobUrl && this.track.timeline.some(item => item.chunkIndex === this.chunkIndex)
+          && !this.inKeepAlive && !this.audio.error && this.audio.readyState >= 2) {
         try {
           this.playing = true;
           this.#applyPlaybackRate();
@@ -1112,12 +1119,7 @@ export class TtsController {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 35000);
       try {
-        const response = await fetch(endpoint, {
-          method: 'POST',
-          headers,
-          signal: controller.signal,
-          body: JSON.stringify(buildTtsRequestBody(chunk.text, this.settings)),
-        });
+        const response = await requestSpeech(endpoint, chunk.text, this.settings, headers, controller.signal);
         if (!response.ok) {
           const detail = await response.text().catch(() => '');
           throw new Error(`HTTP ${response.status}${detail ? ` ${detail.slice(0, 60)}` : ''}`);

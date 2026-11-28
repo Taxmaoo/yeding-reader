@@ -1,21 +1,21 @@
-import { DEFAULT_SETTINGS, SAMPLE, decodeTxt, indexText, sectionAt, progressAt, isLowSurrogate } from './reader-core.mjs?v=39';
+import { DEFAULT_SETTINGS, SAMPLE, decodeTxt, indexText, sectionAt, progressAt, isLowSurrogate } from './reader-core.mjs?v=40';
 import {
   listBooks, listTextIds, readText, saveBook, addBook, putBook, deleteBook,
-  saveMetaMirror, requestPersistentStorage,
-} from './storage.mjs?v=39';
+  saveMetaMirror, requestPersistentStorage, readDownloadRows, saveDownloadRows, clearDownloadRows,
+} from './storage.mjs?v=40';
 import {
   TtsController, EDGE_VOICES, SLEEP_OPTIONS,
   testTtsEndpoint, resolveApiEndpoint, loadLastListened, saveLastListened,
-} from './tts.mjs?v=39';
+} from './tts.mjs?v=40';
 import {
   generateSyncKey, validateSyncKey, loadSyncKey, saveSyncKey, loadLastSyncTime,
   markLocalDeleted, clearLocalDeleted, checkCloudStatus, pushBookMeta,
-  uploadBookFull, recoverBookTextFromCloud, syncAllBooks, scheduleMetaSync, flushMetaSync,
+  uploadBookFull, recoverBookFromCloud, syncAllBooks, scheduleMetaSync, flushMetaSync,
   exportLibraryBackup, importLibraryBackup,
-} from './sync.mjs?v=39';
-import { setupDownload, openUpdateForBook } from './download.mjs?v=39';
+} from './sync.mjs?v=40';
+import { setupDownload, openUpdateForBook } from './download.mjs?v=40';
 
-const APP_VERSION = 'v39';
+const APP_VERSION = 'v40';
 
 const $ = id => document.getElementById(id);
 const viewport = $('viewport');
@@ -357,15 +357,17 @@ async function openBook(book, supplied) {
     if (!text && loadSyncKey()) {
       toast(`正在从私人云书库补回《${book.title}》正文…`);
       try {
-        text = await recoverBookTextFromCloud(book.id);
-        if (text) {
-          book.length = text.length;
-          await putBook(book, text);
+        const recovered = await recoverBookFromCloud(book);
+        if (recovered) {
+          await putBook(recovered.book, recovered.text);
+          book = recovered.book;
+          text = recovered.text;
+          books = books.map(item => item.id === book.id ? book : item);
         }
       } catch {}
     }
     if (!text) throw new Error('missing text');
-    const { chapters, sections, hasHeadings } = indexText(text);
+    const { chapters, sections, hasHeadings } = indexText(text, book.dl?.manifest);
     active = { book, text, chapters, sections, hasHeadings, sectionIndex: -1, spans: [], page: 0 };
     book.lastRead = Date.now();
     book.settings = { ...DEFAULT_SETTINGS, ...book.settings };
@@ -864,7 +866,7 @@ function toc(initialTab = 'toc') {
     for (const mark of book.marks) {
       const row = element('div', null, 'dialog-row');
       const remove = button('×', () => {
-        book.marks = book.marks.filter(item => item !== mark);
+        removeMark(book, mark);
         store(book);
         tabMarks.textContent = book.marks.length ? `书签 ${book.marks.length}` : '书签';
         renderMarksPane();
@@ -967,10 +969,17 @@ function addMark() {
   const { book, text, sections, sectionIndex } = active;
   if (book.marks.some(mark => mark.position === book.position)) return toast('这个位置已有书签。');
   const snippet = text.slice(book.position, book.position + 54).replace(/\s+/g, ' ').trim();
-  book.marks.push({ position: book.position, label: sections[sectionIndex].title, snippet });
+  const updatedAt = Math.max(Date.now(), Number(book.markDeletes?.[book.position] || 0) + 1);
+  book.marks.push({ position: book.position, label: sections[sectionIndex].title, snippet, updatedAt });
   book.marks.sort((a, b) => a.position - b.position);
   store(book);
   toast('已添加书签。');
+}
+
+function removeMark(book, mark) {
+  book.marks = book.marks.filter(item => item !== mark);
+  const deletedAt = Math.max(Date.now(), Number(mark.updatedAt) || 0);
+  book.markDeletes = { ...book.markDeletes, [mark.position]: deletedAt };
 }
 
 function bookmarks() {
@@ -979,7 +988,7 @@ function bookmarks() {
   openDialog('书签', ...book.marks.map(mark => {
     const row = element('div', null, 'dialog-row');
     const remove = button('×', () => {
-      book.marks = book.marks.filter(item => item !== mark);
+      removeMark(book, mark);
       store(book);
       bookmarks();
     }, 'icon-button');
@@ -1046,9 +1055,12 @@ $('importBtn').onclick = () => $('fileInput').click();
 openDownload = setupDownload({
   findBookByRemote: remoteId => books.find(b => b.remoteId === remoteId) || null,
   readText: id => readText(id),
+  readDownloadRows,
+  saveDownloadRows,
+  clearDownloadRows,
   upsertBook: async ({ title, author, remoteId, text, dl }) => {
     const existing = books.find(b => b.remoteId === remoteId) || null;
-    const book = existing || makeBook(
+    const book = existing ? { ...existing } : makeBook(
       globalThis.crypto?.randomUUID?.() ?? `book-${Date.now()}-${Math.random().toString(36).slice(2)}`,
       String(title || '未命名小说').trim(),
       text,
@@ -1057,11 +1069,14 @@ openDownload = setupDownload({
     book.remoteId = remoteId;
     book.source = 'fanqie';
     book.dl = dl;
+    book.textUpdatedAt = dl.updatedAt;
+    delete book.textHash;
     book.length = text.length;
     if (book.position > text.length) book.position = text.length;
     await addBook(book, text);
     clearLocalDeleted(book.id);
-    if (!existing) books.push(book);
+    if (existing) books = books.map(item => item.id === book.id ? book : item);
+    else books.push(book);
     saveMetaMirror(books);
     renderShelf();
     if (loadSyncKey()) {
@@ -2024,14 +2039,11 @@ function versionRow() {
       const reg = await navigator.serviceWorker?.getRegistration();
       if (reg) await reg.update();
       const res = await fetch(`./sw.js?ts=${Date.now()}`, { cache: 'no-store' });
-      const text = await res.text();
-      const remote = /VERSION = '(v\d+)'/.exec(text)?.[1] || '未知';
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const remote = /VERSION = '(v\d+)'/.exec(await res.text())?.[1];
+      if (!remote) throw new Error('无法识别版本');
       if (remote !== APP_VERSION) {
         label.textContent = `发现新版本 ${remote}，正在刷新…`;
-        const regs = await navigator.serviceWorker?.getRegistrations() || [];
-        await Promise.all(regs.map(r => r.unregister()));
-        const keys = await caches.keys();
-        await Promise.all(keys.map(k => caches.delete(k)));
         setTimeout(() => location.reload(), 600);
         return;
       }
@@ -2056,7 +2068,7 @@ $('backupInput').onchange = async event => {
   if (!file) return;
   try {
     toast('正在恢复备份文件…');
-    const count = await importLibraryBackup(file, books, putBook);
+    const count = await importLibraryBackup(file, books, putBook, readText);
     books = await listBooks();
     saveMetaMirror(books);
     renderShelf();

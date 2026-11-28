@@ -2,18 +2,18 @@
 
 const SCOPE = new URL(self.registration.scope);
 // 发布静态资源的任何变更时递增版本号；不同部署目录互不清理缓存。
-const VERSION = 'v39';
+const VERSION = 'v40';
 const CACHE_PREFIX = `yeding-reader:${encodeURIComponent(SCOPE.href)}:`;
 const CACHE_NAME = `${CACHE_PREFIX}${VERSION}`;
 const STATIC_URLS = new Set([
-  'index.html',
-  'styles.css?v=39',
-  'app.mjs?v=39',
-  'reader-core.mjs?v=39',
-  'storage.mjs?v=39',
-  'tts.mjs?v=39',
-  'sync.mjs?v=39',
-  'download.mjs?v=39',
+  './',
+  'styles.css?v=40',
+  'app.mjs?v=40',
+  'reader-core.mjs?v=40',
+  'storage.mjs?v=40',
+  'tts.mjs?v=40',
+  'sync.mjs?v=40',
+  'download.mjs?v=40',
   'manifest.webmanifest',
   'icon-192.png',
   'icon-512.png',
@@ -52,7 +52,7 @@ self.addEventListener('fetch', (event) => {
   let cacheKey;
   if (request.mode === 'navigate') {
     if (url.pathname !== SCOPE.pathname && url.pathname !== ENTRY_URL.pathname) return;
-    cacheKey = ENTRY_URL.href;
+    cacheKey = SCOPE.href;
   } else if (STATIC_URLS.has(url.href)) {
     cacheKey = url.href;
   } else {

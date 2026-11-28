@@ -24,6 +24,7 @@ const BOILERPLATE = /^(版权(信息|声明)?页?|目录|免责声明|作者的�
 
 let hooks = {
   upsertBook: null, readText: null, findBookByRemote: null, openBook: null, toast: null,
+  readDownloadRows: null, saveDownloadRows: null, clearDownloadRows: null,
 };
 let busy = false;
 let activeRunCancel = null;
@@ -60,6 +61,7 @@ function updateTask(id, patch) {
 
 function removeTask(id) {
   saveTasks(loadTasks().filter(item => item.id !== id));
+  hooks.clearDownloadRows?.(id).catch(() => {});
 }
 
 /** 同一本书只保留一个任务，避免队列里堆一地重复项。 */
@@ -67,7 +69,11 @@ function createTask({ remoteId, title, mode, pace, replace = false, limit = 0 })
   const running = loadTasks().find(item => item.remoteId === remoteId
     && ['queued', 'running', 'pausing'].includes(item.status));
   if (running) return running;
-  const list = loadTasks().filter(item => item.remoteId !== remoteId);
+  const prior = loadTasks();
+  const list = prior.filter(item => item.remoteId !== remoteId);
+  for (const item of prior) {
+    if (item.remoteId === remoteId && item.replace) hooks.clearDownloadRows?.(item.id).catch(() => {});
+  }
   const task = {
     id: `t-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     remoteId,
@@ -238,7 +244,9 @@ function renderTaskList(box) {
     } else if (task.status === 'pausing') {
       actions.append(button('暂停中…', () => {}, 'secondary'));
     }
-    actions.append(button('移除', () => { removeTask(task.id); renderTaskList(box); }, 'secondary'));
+    if (task.status !== 'running' && task.status !== 'pausing') {
+      actions.append(button('移除', () => { removeTask(task.id); renderTaskList(box); }, 'secondary'));
+    }
     row.append(info, bar, actions);
     return row;
   }));
@@ -443,9 +451,13 @@ function openFreshPanel({ bookId, catalog, seed }) {
     limitRow, paceRow, actionRow(start, button('下载任务', () => openTasksPanel(), 'secondary')), body);
 }
 
+function countManifestDrift(manifest, chapters) {
+  return manifest.filter((entry, index) => entry?.id !== chapters[index]?.id).length;
+}
+
 function openResumePanel({ bookId, catalog, existing, seed }) {
   const dl = existing.dl || null;
-  const manifest = dl?.manifest || [];
+  const manifest = Array.isArray(dl?.manifest) ? dl.manifest : [];
   const have = new Set(manifest.map(entry => entry.id));
   const missing = catalog.chapters.filter(chapter => !have.has(chapter.id));
   const failed = manifest.filter(entry => entry.ok === false);
@@ -454,7 +466,7 @@ function openResumePanel({ bookId, catalog, existing, seed }) {
   const pace = paceSelectElement();
   const body = element('div', null, 'dl-download');
 
-  if (!dl) {
+  if (!Array.isArray(dl?.manifest)) {
     // 旧版本下载的书没有章节清单，只能整本重下（覆盖正文，保留阅读进度与书签）
     openPanel('这本书是旧版下载的',
       statusLine('《' + title + '》没有章节清单，无法只补新章。可以让它重新拉取整本并替换正文（阅读进度、书签保留）。', 'is-warn'),
@@ -469,20 +481,11 @@ function openResumePanel({ bookId, catalog, existing, seed }) {
 
   // 章序自检：正文里第 i 条应当正好是目录第 i+1 章。
   // 只要出现「位置漂移」或「跳章」，说明这本书的正文是旧版本按错误偏移拼出来的，增量补只会越补越乱。
-  const posById = new Map(catalog.chapters.map((chapter, index) => [chapter.id, index + 1]));
-  let drift = 0;
-  let jumps = 0;
-  let unknown = 0;
-  let prevPos = 0;
-  manifest.forEach((entry, index) => {
-    const pos = posById.get(entry.id) || 0;
-    if (!pos) { unknown += 1; return; }
-    if (pos !== index + 1) drift += 1;
-    if (prevPos && pos !== prevPos + 1) jumps += 1;
-    prevPos = pos;
-  });
+  const drift = countManifestDrift(manifest, catalog.chapters);
+  const catalogIds = new Set(catalog.chapters.map(chapter => chapter.id));
+  const unknown = manifest.filter(entry => !catalogIds.has(entry?.id)).length;
   const allUnknown = manifest.length > 0 && unknown === manifest.length;
-  const broken = drift > 0 || jumps > 0 || allUnknown;
+  const broken = drift > 0;
 
   const uptoDate = missing.length === 0 && failed.length === 0 && !broken;
   const start = button(
@@ -492,7 +495,7 @@ function openResumePanel({ bookId, catalog, existing, seed }) {
     async () => {
       if (broken) {
         openPanel('先修复这本书',
-          statusLine(`检测到 ${drift || jumps} 处章序异常：正文里的第 N 条不是目录第 N 章。继续增量补章会把它拼得更乱。`, 'is-warn'),
+          statusLine(`检测到 ${drift} 处章序异常：正文里的第 N 条不是目录第 N 章。继续增量补章会把它拼得更乱。`, 'is-warn'),
           statusLine('建议点「重新下载整本」：会按目录顺序重抓正文，阅读进度和书签保留。'),
           actionRow(button('重新下载整本', async () => {
             writeSetting(PACE_KEY, pace.value);
@@ -522,7 +525,7 @@ function openResumePanel({ bookId, catalog, existing, seed }) {
     broken
       ? statusLine(allUnknown
         ? `⚠ 这本书的章节清单与当前目录完全对不上（${unknown} 章全部失效），大概率是旧版本留下的残档。请点「重新下载整本」按目录顺序重抓。`
-        : `⚠ 检测到章序异常 ${drift || jumps} 处${unknown ? `（另有 ${unknown} 章已不在目录里）` : ''}：正文第 N 条不是目录第 N 章，继续增量补只会更乱，请先「重新下载整本」。`, 'is-warn')
+        : `⚠ 检测到章序异常 ${drift} 处${unknown ? `（其中 ${unknown} 章已不在目录里）` : ''}：正文第 N 条不是目录第 N 章，继续增量补只会更乱，请先「重新下载整本」。`, 'is-warn')
       : null,
     paceRow,
     actionRow(start, button('下载任务', () => openTasksPanel(), 'secondary'), button('重新下载整本', () => {
@@ -576,11 +579,12 @@ function patchEntry(text, manifest, index, block, ok) {
 }
 
 async function runDownload({
-  bookId, catalog, existing, container, title, author, chapters, retryFailed = [], pace, replace = false, task = null,
+  bookId, catalog, existing, textBefore, container, title, author, chapters, retryFailed = [], pace, replacement, task,
 }) {
   if (busy) return;
   busy = true;
   let cancelled = false;
+  let status = 'done';
   let stopReason = '';
   const requestStop = reason => {
     cancelled = true;
@@ -610,6 +614,14 @@ async function runDownload({
   let delay = pace.delay;
   let rotations = 0;
   const startedAt = Date.now();
+  const saveReplacementRows = async page => {
+    if (!replacement) return;
+    const complete = page.filter(row => row && replacement.ids.has(row.id)
+      && ((row.ok && row.text) || BOILERPLATE.test(String(row.title || '').trim())));
+    if (!complete.length) return;
+    await hooks.saveDownloadRows(task.id, complete);
+    for (const row of complete) replacement.rows.set(row.id, row);
+  };
 
   const requestPage = async (slice, fresh) => {
     const data = await api('chapters', {
@@ -706,6 +718,7 @@ async function runDownload({
         rows.push(row);
         if (!row.ok) failedCount += 1;
       }
+      await saveReplacementRows(ordered);
       done += slice.length;
       tick();
       if (i + BATCH < chapters.length) await sleep(delay);
@@ -715,7 +728,7 @@ async function runDownload({
     // ②½ 补漏：跑完后对仍失败的章做多轮延时重试，风控窗口通常几秒到几十秒
     if (!cancelled && rows.some(row => !row.ok)) {
       const waits = [2000, 5000, 12000, 25000];
-      for (let round = 0; round < waits.length; round += 1) {
+      for (let round = 0; round < waits.length && !cancelled; round += 1) {
         const failed = rows.filter(row => !row.ok);
         if (!failed.length) break;
         log.textContent = `补漏第 ${round + 1}/${waits.length} 轮：${failed.length} 章待补，先等 ${Math.round(waits[round] / 1000)}s…`;
@@ -735,6 +748,7 @@ async function runDownload({
             const index = rows.findIndex(item => item.id === row.id);
             if (index >= 0) rows[index] = row;
           }
+          await saveReplacementRows(page);
           await sleep(Math.max(600, Math.round(delay / 2)));
         }
         if (!rows.some(row => !row.ok)) break;
@@ -743,9 +757,19 @@ async function runDownload({
       tick('补漏完成');
     }
 
-    if (total === 0) {
+    if (replacement) {
+      const missing = replacement.ids.size - replacement.rows.size;
+      if (cancelled || missing) {
+        log.textContent = `替换进度已保存（${replacement.rows.size}/${replacement.ids.size} 章），原正文已保留。`;
+        log.className = 'dl-status is-warn';
+        updateTask(task.id, { missing, message: log.textContent });
+        return;
+      }
+      rows.splice(0, rows.length, ...replacement.chapters.map(chapter => replacement.rows.get(chapter.id)));
+    } else if (total === 0) {
       log.textContent = '这本书已经是最新的了。';
       log.className = 'dl-status is-ok';
+      updateTask(task.id, { done: 0, missing: 0, message: log.textContent });
       return;
     }
     if (!rows.length) {
@@ -757,16 +781,15 @@ async function runDownload({
     // ③ 组装：替换模式重排全书，否则在原文后面追加 + 就地补旧章
     log.textContent = '整理正文…';
     const byId = new Map(rows.map(row => [row.id, row]));
-    const manifest = existing?.dl?.manifest && !replace ? existing.dl.manifest.map(entry => ({ ...entry })) : [];
-    let text = existing && !replace ? await hooks.readText(existing.id) : '';
-    if (typeof text !== 'string') text = '';
+    const manifest = replacement ? [] : (existing?.dl?.manifest || []).map(entry => ({ ...entry }));
+    let text = textBefore;
 
     let patched = 0;
     for (let i = 0; i < manifest.length; i += 1) {
       const entry = manifest[i];
       if (entry.ok !== false) continue;
       const row = byId.get(entry.id);
-      if (!row?.ok) continue;
+      if (!row?.ok || !row.text) continue;
       const index = indexOf.get(entry.id) ?? 0;
       text = patchEntry(text, manifest, i, `${normalizeHeading(index, row.title || entry.title)}\n\n${row.text}`, true);
       patched += 1;
@@ -783,6 +806,7 @@ async function runDownload({
     const appended = appendEntries(text, items);
     text = appended.text;
     manifest.push(...appended.entries);
+    if (!text.trim()) throw new Error('没有取到可保存的正文');
 
     const okCount = appended.entries.filter(entry => entry.ok && !entry.skipped).length;
     const skippedCount = appended.entries.filter(entry => entry.skipped).length;
@@ -802,9 +826,10 @@ async function runDownload({
         updatedAt: Date.now(),
       },
     });
+    if (replacement) await hooks.clearDownloadRows(task.id).catch(() => {});
     fill.style.width = '100%';
     log.textContent = [
-      replace
+      replacement
         ? '已用最新内容替换全书'
         : (okCount ? `已加入书架：${okCount} 章正文` : '没有新增正文'),
       patched ? `补回旧章 ${patched} 章` : '',
@@ -817,6 +842,7 @@ async function runDownload({
     if (task) updateTask(task.id, { added: okCount, missing: stillMissing, message: log.textContent });
     container.append(actionRow(button('开始阅读', () => { if (saved) hooks.openBook?.(saved); }, 'primary')));
   } catch (err) {
+    status = 'error';
     log.textContent = err.message || '下载中断';
     log.className = 'dl-status is-warn';
     if (task) updateTask(task.id, { status: 'error', message: log.textContent });
@@ -828,7 +854,7 @@ async function runDownload({
     cancel.remove();
     pauseBtn.remove();
     if (task) {
-      const status = cancelled ? (stopReason === 'pause' ? 'paused' : 'stopped') : 'done';
+      if (status !== 'error' && cancelled) status = stopReason === 'pause' ? 'paused' : 'stopped';
       updateTask(task.id, { status });
     }
   }
@@ -837,47 +863,57 @@ async function runDownload({
 // ---------- 任务执行 ----------
 async function startTask(task, container = null) {
   updateTask(task.id, { status: 'running', message: '读取目录…' });
-  let catalog;
   try {
-    const data = await api(`book?id=${encodeURIComponent(task.remoteId)}`);
-    catalog = data.book;
+    const { book: catalog } = await api(`book?id=${encodeURIComponent(task.remoteId)}`);
+    if (!catalog?.chapters?.length) throw new Error('目录为空，请稍后重试');
+    const existing = hooks.findBookByRemote?.(task.remoteId) || null;
+    const manifest = existing?.dl?.manifest || [];
+    const limit = task.replace || task.mode === 'update' ? MAX_CHAPTERS : (task.limit || MAX_CHAPTERS);
+    const target = catalog.chapters.slice(0, limit);
+    let replacement = null;
+    let textBefore = '';
+    let have;
+    let retryFailed = [];
+    if (task.replace) {
+      const ids = new Set(target.map(chapter => chapter.id));
+      const rows = new Map((await hooks.readDownloadRows(task.id)).filter(row => ids.has(row.id)).map(row => [row.id, row]));
+      replacement = { chapters: target, ids, rows };
+      have = rows;
+    } else {
+      if (existing) {
+        if (!Array.isArray(existing.dl?.manifest) || countManifestDrift(manifest, catalog.chapters)) {
+          throw new Error('章节清单与当前目录不一致，请从书架重新下载整本。');
+        }
+        textBefore = await hooks.readText(existing.id);
+        if (typeof textBefore !== 'string' || !textBefore.trim() || manifest.some(entry => entry.end > textBefore.length)) {
+          throw new Error('本机正文缺失或不完整。请先从云备份恢复，或重新下载整本。');
+        }
+      }
+      have = new Set(manifest.map(entry => entry.id));
+      retryFailed = manifest.filter(entry => entry.ok === false);
+    }
+    if (loadTasks().find(item => item.id === task.id)?.status !== 'running') return;
+    const chapters = target.filter(chapter => !have.has(chapter.id));
+    updateTask(task.id, { total: chapters.length + retryFailed.length, done: 0 });
+    await runDownload({
+      bookId: task.remoteId,
+      catalog,
+      existing,
+      textBefore,
+      container,
+      title: catalog.title || task.title,
+      author: catalog.author,
+      chapters,
+      retryFailed,
+      pace: PACE[task.pace] || PACE.normal,
+      replacement,
+      task,
+    });
   } catch (err) {
-    updateTask(task.id, { status: 'error', message: err.message || '目录读取失败' });
-    return;
+    const message = err.message || '下载准备失败';
+    updateTask(task.id, { status: 'error', message });
+    container?.replaceChildren(statusLine(message, 'is-warn'));
   }
-
-  const existing = hooks.findBookByRemote?.(task.remoteId) || null;
-  const manifest = existing?.dl?.manifest || [];
-  const have = new Set(manifest.map(entry => entry.id));
-  const retryFailed = manifest.filter(entry => entry.ok === false);
-
-  let chapters;
-  if (task.replace) {
-    chapters = catalog.chapters.slice(0, MAX_CHAPTERS);
-  } else {
-    // 先把「这一轮的目标范围」定死（整本 / 前 N 章），再按清单做差集：
-    // 暂停后继续只补这个范围里还没下的章，不会多取也不会从头重取
-    const windowSize = task.mode === 'update'
-      ? MAX_CHAPTERS
-      : (task.limit || Math.min(catalog.chapters.length, MAX_CHAPTERS));
-    chapters = catalog.chapters.slice(0, windowSize).filter(chapter => !have.has(chapter.id));
-  }
-
-  updateTask(task.id, { total: chapters.length + retryFailed.length });
-
-  await runDownload({
-    bookId: task.remoteId,
-    catalog,
-    existing,
-    container,
-    title: catalog.title || task.title,
-    author: catalog.author,
-    chapters,
-    retryFailed,
-    pace: PACE[task.pace] || PACE.normal,
-    replace: Boolean(task.replace),
-    task,
-  });
 }
 
 let pumping = false;
