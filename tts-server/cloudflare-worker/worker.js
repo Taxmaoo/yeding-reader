@@ -1487,6 +1487,20 @@ async function ensureVaultSchema(db) {
     db.prepare(
       `CREATE INDEX IF NOT EXISTS idx_books_vault_updated ON books (vault_id, updated_at DESC)`,
     ),
+    db.prepare(
+      `CREATE TABLE IF NOT EXISTS book_upload_chunks (
+        vault_id TEXT NOT NULL, book_id TEXT NOT NULL, upload_id TEXT NOT NULL,
+        chunk_idx INTEGER NOT NULL, data_b64 TEXT NOT NULL, received_at INTEGER NOT NULL,
+        PRIMARY KEY (vault_id, book_id, upload_id, chunk_idx)
+      )`,
+    ),
+    db.prepare(
+      `CREATE TABLE IF NOT EXISTS book_active_uploads (
+        vault_id TEXT NOT NULL, book_id TEXT NOT NULL, upload_id TEXT NOT NULL,
+        text_hash TEXT NOT NULL, text_updated_at INTEGER NOT NULL,
+        PRIMARY KEY (vault_id, book_id)
+      )`,
+    ),
   ]);
   vaultSchemaReady = true;
 }
@@ -1507,6 +1521,19 @@ async function resolveVaultId(request) {
 function validBookId(id) {
   return typeof id === 'string' && id.length >= 1 && id.length <= 160 && !/[\\/\0]/.test(id);
 }
+
+const validUploadId = value => typeof value === 'string' && /^[\da-f-]{36}$/i.test(value);
+const BOOK_TEXT_META = ['length', 'dl', 'textUpdatedAt'];
+const textMetaFrom = (target, source) => `json_set(${target}, ${BOOK_TEXT_META.map(key =>
+  `'$.${key}', json_extract(${source}, '$.${key}')`).join(', ')})`;
+const mergeBookmarkDeletes = target => `json_set(${target}, '$.markDeletes', json((
+  SELECT json_group_object(key, deleted_at) FROM (
+    SELECT key, MAX(CAST(value AS INTEGER)) AS deleted_at FROM (
+      SELECT key, value FROM json_each(books.meta_json, '$.markDeletes')
+      UNION ALL SELECT key, value FROM json_each(excluded.meta_json, '$.markDeletes')
+    ) GROUP BY key
+  )
+)))`;
 
 async function handleSyncRequest(request, url, env) {
   if (!env?.DB) {
@@ -1541,18 +1568,26 @@ async function handleSyncRequest(request, url, env) {
 
     if (sub === '/books' && request.method === 'GET') {
       const { results } = await env.DB.prepare(
-        `SELECT book_id, meta_json, has_text, text_hash, encoding, chunk_count, updated_at, deleted
-         FROM books WHERE vault_id = ? ORDER BY updated_at DESC`,
+        `SELECT books.*, active.upload_id, active.text_updated_at FROM books
+         LEFT JOIN book_active_uploads AS active
+           ON active.vault_id = books.vault_id AND active.book_id = books.book_id AND active.text_hash = books.text_hash
+         WHERE books.vault_id = ? ORDER BY books.updated_at DESC`,
       ).bind(vaultId).all();
       const books = (results || []).map(r => {
         let meta = null;
         try { meta = JSON.parse(r.meta_json); } catch {}
+        if (Array.isArray(meta?.marks) && meta.markDeletes) {
+          meta.marks = meta.marks.filter(mark => mark && (!meta.markDeletes[mark.position]
+            || Number(mark.updatedAt) > Number(meta.markDeletes[mark.position])));
+        }
         return {
           bookId: r.book_id,
           meta,
           hasText: Boolean(r.has_text),
           textHash: r.text_hash || '',
           encoding: r.encoding || 'gzip',
+          textRevision: r.upload_id || 'base',
+          textUpdatedAt: Number(r.text_updated_at || meta?.textUpdatedAt || meta?.dl?.updatedAt || meta?.created || 1),
           chunkCount: Number(r.chunk_count || 0),
           updatedAt: Number(r.updated_at || 0),
           deleted: Boolean(r.deleted),
@@ -1588,18 +1623,25 @@ async function handleSyncRequest(request, url, env) {
                text_hash = '',
                chunk_count = 0,
                updated_at = excluded.updated_at,
-               deleted = 1`,
+               deleted = 1
+             WHERE excluded.updated_at >= books.updated_at`,
           ).bind(vaultId, bookId, metaJson, updatedAt),
-          env.DB.prepare(`DELETE FROM book_chunks WHERE vault_id = ? AND book_id = ?`).bind(vaultId, bookId),
+          ...['book_chunks', 'book_upload_chunks', 'book_active_uploads'].map(table => env.DB.prepare(
+            `DELETE FROM ${table} WHERE vault_id = ? AND book_id = ? AND EXISTS (
+               SELECT 1 FROM books WHERE vault_id = ? AND book_id = ? AND deleted = 1 AND updated_at = ?
+             )`,
+          ).bind(vaultId, bookId, vaultId, bookId, updatedAt)),
         ]);
       } else {
         await env.DB.prepare(
           `INSERT INTO books (vault_id, book_id, meta_json, updated_at, deleted)
            VALUES (?, ?, ?, ?, 0)
            ON CONFLICT(vault_id, book_id) DO UPDATE SET
-             meta_json = excluded.meta_json,
-             updated_at = CASE WHEN excluded.updated_at >= books.updated_at THEN excluded.updated_at ELSE books.updated_at END,
-             deleted = 0`,
+              meta_json = ${mergeBookmarkDeletes(`CASE WHEN excluded.updated_at < books.updated_at THEN books.meta_json
+                WHEN books.has_text = 1 THEN ${textMetaFrom('excluded.meta_json', 'books.meta_json')}
+                ELSE excluded.meta_json END`)},
+              updated_at = MAX(excluded.updated_at, books.updated_at)
+            WHERE books.deleted = 0`,
         ).bind(vaultId, bookId, metaJson, updatedAt).run();
       }
       return Response.json({ ok: true, bookId, updatedAt, deleted }, { headers: corsHeaders() });
@@ -1609,7 +1651,7 @@ async function handleSyncRequest(request, url, env) {
     if (chunkMatch) {
       const bookId = decodeURIComponent(chunkMatch[1]);
       const idx = Number(chunkMatch[2]);
-      if (!validBookId(bookId) || !Number.isInteger(idx) || idx < 0 || idx > 500) {
+      if (!validBookId(bookId) || !Number.isInteger(idx) || idx < 0 || idx >= 500) {
         return Response.json({ error: '无效的分片参数' }, { status: 400, headers: corsHeaders() });
       }
       if (request.method === 'PUT' || request.method === 'POST') {
@@ -1618,23 +1660,41 @@ async function handleSyncRequest(request, url, env) {
         if (!dataB64 || dataB64.length > 800 * 1024) {
           return Response.json({ error: '分片数据无效或超过大小限制' }, { status: 400, headers: corsHeaders() });
         }
+        const uploadId = body.uploadId;
+        if (!validUploadId(uploadId)) {
+          return Response.json({ error: '请刷新到新版后重新上传正文' }, { status: 409, headers: corsHeaders() });
+        }
+        if (idx === 0) {
+          await env.DB.prepare('DELETE FROM book_upload_chunks WHERE vault_id = ? AND book_id = ? AND received_at < ?')
+            .bind(vaultId, bookId, Date.now() - 86400000).run();
+        }
         await env.DB.prepare(
-          `INSERT INTO book_chunks (vault_id, book_id, chunk_idx, data_b64)
-           VALUES (?, ?, ?, ?)
-           ON CONFLICT(vault_id, book_id, chunk_idx) DO UPDATE SET data_b64 = excluded.data_b64`,
-        ).bind(vaultId, bookId, idx, dataB64).run();
+          `INSERT INTO book_upload_chunks (vault_id, book_id, upload_id, chunk_idx, data_b64, received_at)
+           SELECT ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (
+             SELECT 1 FROM book_active_uploads WHERE vault_id = ? AND book_id = ? AND upload_id = ?
+           )
+           ON CONFLICT(vault_id, book_id, upload_id, chunk_idx) DO NOTHING`,
+        ).bind(vaultId, bookId, uploadId, idx, dataB64, Date.now(), vaultId, bookId, uploadId).run();
         return Response.json({ ok: true, bookId, idx }, { headers: corsHeaders() });
       }
       if (request.method === 'GET') {
+        const revision = url.searchParams.get('revision');
+        if (revision && revision !== 'base' && !validUploadId(revision)) {
+          return Response.json({ error: '无效的正文版本' }, { status: 400, headers: corsHeaders() });
+        }
         const row = await env.DB.prepare(
-          `SELECT data_b64 FROM book_chunks WHERE vault_id = ? AND book_id = ? AND chunk_idx = ?`,
-        ).bind(vaultId, bookId, idx).first();
+          `SELECT chunks.data_b64 FROM book_chunks AS chunks JOIN books USING (vault_id, book_id)
+           LEFT JOIN book_active_uploads AS active
+             ON active.vault_id = books.vault_id AND active.book_id = books.book_id AND active.text_hash = books.text_hash
+           WHERE chunks.vault_id = ? AND chunks.book_id = ? AND chunks.chunk_idx = ?
+             AND books.deleted = 0 AND books.has_text = 1 AND (? IS NULL OR COALESCE(active.upload_id, 'base') = ?)`,
+        ).bind(vaultId, bookId, idx, revision, revision).first();
         if (!row) {
-          return Response.json({ error: '分片不存在' }, { status: 404, headers: corsHeaders() });
+          return Response.json({ error: '正文版本已变更或分片不存在，请重新同步' }, { status: 404, headers: corsHeaders() });
         }
         return Response.json(
           { ok: true, bookId, idx, dataB64: row.data_b64 },
-          { headers: { ...corsHeaders(), 'Cache-Control': 'private, max-age=300' } },
+          { headers: { ...corsHeaders(), 'Cache-Control': 'no-store' } },
         );
       }
     }
@@ -1650,26 +1710,70 @@ async function handleSyncRequest(request, url, env) {
       const textHash = String(body.textHash || '').slice(0, 128);
       const encoding = body.encoding === 'utf8' ? 'utf8' : 'gzip';
       const updatedAt = Math.max(1, Number(body.updatedAt) || Date.now());
-      const metaJson = JSON.stringify(body.meta || { id: bookId });
+      const meta = body.meta || { id: bookId };
+      const textUpdatedAt = Math.max(1, Number(body.textUpdatedAt || meta.dl?.updatedAt || meta.created) || updatedAt);
+      const metaJson = JSON.stringify({ ...meta, textUpdatedAt });
       if (!Number.isInteger(chunkCount) || chunkCount < 1 || chunkCount > 500) {
         return Response.json({ error: '分片数量无效' }, { status: 400, headers: corsHeaders() });
       }
-      await env.DB.batch([
-        env.DB.prepare(`DELETE FROM book_chunks WHERE vault_id = ? AND book_id = ? AND chunk_idx >= ?`)
-          .bind(vaultId, bookId, chunkCount),
+      const uploadId = body.uploadId;
+      if (!validUploadId(uploadId)) {
+        return Response.json({ error: '请刷新到新版后重新上传正文' }, { status: 409, headers: corsHeaders() });
+      }
+      if (!/^[\da-f]{64}$/i.test(textHash) || metaJson.length > 512 * 1024) {
+        return Response.json({ error: '无效的正文校验值或元数据' }, { status: 400, headers: corsHeaders() });
+      }
+      const canPublish = `EXISTS (SELECT 1 FROM book_active_uploads JOIN book_upload_chunks USING (vault_id, book_id, upload_id)
+        WHERE vault_id = ? AND book_id = ? AND upload_id = ? AND chunk_idx = 0)`;
+      const result = await env.DB.batch([
+        env.DB.prepare(
+          `INSERT INTO book_active_uploads (vault_id, book_id, upload_id, text_hash, text_updated_at)
+           SELECT ?, ?, ?, ?, ? WHERE (
+             SELECT COUNT(*) FROM book_upload_chunks WHERE vault_id = ? AND book_id = ? AND upload_id = ? AND chunk_idx < ?
+           ) = ? AND NOT EXISTS (
+             SELECT 1 FROM books WHERE vault_id = ? AND book_id = ? AND (
+               (deleted = 1 AND updated_at >= ?) OR (has_text = 1 AND COALESCE(
+                 CAST(json_extract(meta_json, '$.textUpdatedAt') AS INTEGER),
+                 CAST(json_extract(meta_json, '$.dl.updatedAt') AS INTEGER),
+                 CAST(json_extract(meta_json, '$.created') AS INTEGER), 1
+               ) > ?)
+             )
+           )
+           ON CONFLICT(vault_id, book_id) DO UPDATE SET upload_id = excluded.upload_id, text_hash = excluded.text_hash,
+             text_updated_at = excluded.text_updated_at
+        `).bind(vaultId, bookId, uploadId, textHash, textUpdatedAt, vaultId, bookId, uploadId, chunkCount,
+          chunkCount, vaultId, bookId, updatedAt, textUpdatedAt),
+        env.DB.prepare(`DELETE FROM book_chunks WHERE vault_id = ? AND book_id = ? AND ${canPublish}`)
+          .bind(vaultId, bookId, vaultId, bookId, uploadId),
+        env.DB.prepare(
+          `INSERT INTO book_chunks (vault_id, book_id, chunk_idx, data_b64)
+           SELECT vault_id, book_id, chunk_idx, data_b64 FROM book_upload_chunks
+           WHERE vault_id = ? AND book_id = ? AND upload_id = ? AND chunk_idx < ? AND ${canPublish}`,
+        ).bind(vaultId, bookId, uploadId, chunkCount, vaultId, bookId, uploadId),
         env.DB.prepare(
           `INSERT INTO books (vault_id, book_id, meta_json, has_text, text_hash, encoding, chunk_count, updated_at, deleted)
-           VALUES (?, ?, ?, 1, ?, ?, ?, ?, 0)
+           SELECT ?, ?, ?, 1, ?, ?, ?, ?, 0 WHERE ${canPublish}
            ON CONFLICT(vault_id, book_id) DO UPDATE SET
-             meta_json = excluded.meta_json,
+              meta_json = ${mergeBookmarkDeletes(`CASE WHEN excluded.updated_at >= books.updated_at THEN excluded.meta_json
+                ELSE ${textMetaFrom('books.meta_json', 'excluded.meta_json')} END`)},
              has_text = 1,
              text_hash = excluded.text_hash,
              encoding = excluded.encoding,
              chunk_count = excluded.chunk_count,
-             updated_at = excluded.updated_at,
+             updated_at = MAX(excluded.updated_at, books.updated_at),
              deleted = 0`,
-        ).bind(vaultId, bookId, metaJson, textHash, encoding, chunkCount, updatedAt),
+        ).bind(vaultId, bookId, metaJson, textHash, encoding, chunkCount, updatedAt, vaultId, bookId, uploadId),
+        env.DB.prepare(
+          `DELETE FROM book_upload_chunks WHERE vault_id = ? AND book_id = ? AND (upload_id = ? OR received_at < ?)
+           AND EXISTS (SELECT 1 FROM book_active_uploads WHERE vault_id = ? AND book_id = ? AND upload_id = ?)`,
+        ).bind(vaultId, bookId, uploadId, Date.now() - 86400000, vaultId, bookId, uploadId),
+        env.DB.prepare(
+          `SELECT upload_id FROM book_active_uploads WHERE vault_id = ? AND book_id = ? AND text_hash = ?`,
+        ).bind(vaultId, bookId, textHash),
       ]);
+      if (result.at(-1)?.results?.[0]?.upload_id !== uploadId) {
+        return Response.json({ error: '正文上传不完整或云端已有较新版本，请先同步再重试' }, { status: 409, headers: corsHeaders() });
+      }
       return Response.json({ ok: true, bookId, chunkCount, updatedAt }, { headers: corsHeaders() });
     }
 
@@ -1838,11 +1942,12 @@ async function synthesizeSegments(segments, defaultVoice, defaultSpeed) {
 
 export default {
   async fetch(request, env) {
+    const url = new URL(request.url);
     if (request.method === 'OPTIONS') {
+      if (url.pathname === '/api/fanqie' || url.pathname.startsWith('/api/fanqie/')) return handleFanqie(request, env);
       return new Response(null, { status: 204, headers: corsHeaders() });
     }
 
-    const url = new URL(request.url);
     if (url.pathname === '/health') {
       return Response.json(
         { ok: true, engine: 'cloudflare-edge-tts', version: 'v4', multiRole: true, cloudVault: Boolean(env?.DB) },
